@@ -585,16 +585,40 @@ ThemeData buildThemeData(HermesSkin skin, Brightness brightness) {
   final effectiveBrightness = ThemeData.estimateBrightnessForColor(
     p.background,
   );
+  // M3 *container* tokens must be set explicitly. If omitted, Flutter falls
+  // back container -> base (primaryContainer -> primary, onPrimaryContainer
+  // -> onPrimary, errorContainer -> error, ...), so surfaces painted with
+  // container colors (e.g. the Settings connection status card, which uses
+  // primaryContainer@0.55 / tertiaryContainer@0.65 / errorContainer) render
+  // as loud flat brand-color slabs with brand-foreground text instead of
+  // subtle tints. Lerping ~72% toward the palette background yields — after
+  // the card's own alpha — roughly the same tint intensity as user chat
+  // bubbles (primary @ 16%), keeping the app cohesive. Container text is
+  // p.foreground, matching the rest of the UI.
   final scheme = ColorScheme(
     brightness: effectiveBrightness,
     primary: p.primary,
     onPrimary: p.primaryForeground,
+    // Tinted "healthy / live" surfaces (connection card, chips):
+    primaryContainer: Color.lerp(p.primary, p.background, 0.72)!,
+    onPrimaryContainer: p.foreground,
     secondary: p.ring,
     onSecondary: p.primaryForeground,
-    surface: p.card,
-    onSurface: p.foreground,
+    // Used by chat system bubbles (secondaryContainer @ 0.45):
+    secondaryContainer: p.secondary,
+    onSecondaryContainer: p.secondaryForeground,
+    // "Degraded" warning card state:
+    tertiary: p.ring,
+    onTertiary: p.primaryForeground,
+    tertiaryContainer: Color.lerp(p.ring, p.background, 0.72)!,
+    onTertiaryContainer: p.foreground,
     error: p.destructive,
     onError: p.destructiveForeground,
+    // Reauth / error card states:
+    errorContainer: Color.lerp(p.destructive, p.background, 0.62)!,
+    onErrorContainer: p.foreground,
+    surface: p.card,
+    onSurface: p.foreground,
     outline: p.border,
     surfaceContainerHighest: p.muted,
     surfaceContainerHigh: p.secondary,
