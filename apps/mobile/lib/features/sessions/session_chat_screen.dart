@@ -88,6 +88,70 @@ bool chatObserverHoldsPositionAt(
   return pixels > fixedPositionOffset;
 }
 
+/// Shared rename surface for embedded sessions and standalone bot chats.
+Future<String?> showRenameSessionDialog(
+  BuildContext context, {
+  required String initialTitle,
+}) {
+  return showDialog<String>(
+    context: context,
+    builder: (_) => _RenameSessionDialog(initialTitle: initialTitle),
+  );
+}
+
+class _RenameSessionDialog extends StatefulWidget {
+  const _RenameSessionDialog({required this.initialTitle});
+
+  final String initialTitle;
+
+  @override
+  State<_RenameSessionDialog> createState() => _RenameSessionDialogState();
+}
+
+class _RenameSessionDialogState extends State<_RenameSessionDialog> {
+  late final TextEditingController _controller;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = TextEditingController(text: widget.initialTitle);
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: Text(context.l10n.renameChat),
+      content: TextField(
+        controller: _controller,
+        autofocus: true,
+        maxLines: 1,
+        textCapitalization: TextCapitalization.sentences,
+        decoration: InputDecoration(
+          border: const OutlineInputBorder(),
+          hintText: context.l10n.title,
+        ),
+        onSubmitted: (value) => Navigator.pop(context, value.trim()),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: Text(context.l10n.cancel),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.pop(context, _controller.text.trim()),
+          child: Text(context.l10n.save),
+        ),
+      ],
+    );
+  }
+}
+
 /// Is this user turn unanswered — i.e. the turn at [index] never got a real
 /// assistant reply (empty tail, or only an API-error / failed banner after
 /// it)? Drives the "No response yet" label plus the Resend/Edit chips, which
@@ -1903,6 +1967,47 @@ class SessionChatScreenState extends ConsumerState<SessionChatScreen> {
     }
   }
 
+  Future<void> _renameCurrentSession() async {
+    final next = await showRenameSessionDialog(
+      context,
+      initialTitle: _session.title ?? '',
+    );
+    if (!mounted || next == null || next == (_session.title ?? '').trim()) {
+      return;
+    }
+    final sync = ref.read(sessionSyncProvider);
+    if (sync == null) return;
+    try {
+      await sync.renameSession(_session.id, next);
+      if (!mounted) return;
+      final renamed = HermesSession(
+        id: _session.id,
+        source: _session.source,
+        userId: _session.userId,
+        model: _session.model,
+        title: next.isEmpty ? null : next,
+        startedAt: _session.startedAt,
+        endedAt: _session.endedAt,
+        endReason: _session.endReason,
+        messageCount: _session.messageCount,
+        toolCallCount: _session.toolCallCount,
+        lastActive: _session.lastActive,
+        preview: _session.preview,
+        parentSessionId: _session.parentSessionId,
+      );
+      setState(() => _session = renamed);
+      widget.onSessionUpdated?.call(renamed);
+      hermesHaptic(HapticIntent.success);
+      unawaited(ref.read(sessionsProvider.notifier).softRefresh());
+    } catch (error) {
+      if (!mounted) return;
+      FeedbackService.instance.error();
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(context.l10n.renameFailed('$error'))),
+      );
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -2167,10 +2272,30 @@ class SessionChatScreenState extends ConsumerState<SessionChatScreen> {
 
     return Scaffold(
       appBar: AppBar(
-        title: Text(
-          _session.displayTitle,
-          maxLines: 1,
-          overflow: TextOverflow.ellipsis,
+        title: InkWell(
+          onTap: _renameCurrentSession,
+          borderRadius: BorderRadius.circular(8),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 6),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Flexible(
+                  child: Text(
+                    _session.displayTitle,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+                const SizedBox(width: 6),
+                Icon(
+                  Icons.edit_outlined,
+                  size: 16,
+                  color: theme.colorScheme.onSurface.withValues(alpha: 0.55),
+                ),
+              ],
+            ),
+          ),
         ),
         actions: [
           IconButton(

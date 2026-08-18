@@ -270,11 +270,38 @@ class _SessionsScreenState extends ConsumerState<SessionsScreen> {
           icon: const Icon(Icons.menu),
           onPressed: () => _scaffoldKey.currentState?.openDrawer(),
         ),
-        title: Text(
-          active?.displayTitle ?? context.l10n.appTitle,
-          maxLines: 1,
-          overflow: TextOverflow.ellipsis,
-        ),
+        title: active == null
+            ? Text(context.l10n.appTitle)
+            : InkWell(
+                onTap: () => _renameSession(active),
+                borderRadius: BorderRadius.circular(8),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 4,
+                    vertical: 6,
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Flexible(
+                        child: Text(
+                          active.displayTitle,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                      const SizedBox(width: 6),
+                      Icon(
+                        Icons.edit_outlined,
+                        size: 16,
+                        color: Theme.of(
+                          context,
+                        ).colorScheme.onSurface.withValues(alpha: 0.55),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
         actions: [
           // Tasteful, unobtrusive — a reviewer/user must never mistake a
           // scripted sample reply for their real agent. Not shown anywhere
@@ -359,36 +386,10 @@ class _SessionsScreenState extends ConsumerState<SessionsScreen> {
   }
 
   Future<void> _renameSession(HermesSession session) async {
-    final ctrl = TextEditingController(text: session.title ?? '');
-    final next = await showDialog<String>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: Text(context.l10n.renameChat),
-        content: TextField(
-          controller: ctrl,
-          autofocus: true,
-          maxLines: 1,
-          textCapitalization: TextCapitalization.sentences,
-          decoration: InputDecoration(
-            border: OutlineInputBorder(),
-            hintText: context.l10n.title,
-          ),
-          onSubmitted: (v) => Navigator.pop(ctx, v.trim()),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: Text(context.l10n.cancel),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(ctx, ctrl.text.trim()),
-            child: Text(context.l10n.save),
-          ),
-        ],
-      ),
+    final next = await showRenameSessionDialog(
+      context,
+      initialTitle: session.title ?? '',
     );
-    // ignore: unawaited_futures
-    Future<void>.delayed(const Duration(milliseconds: 100), ctrl.dispose);
     if (next == null || next == (session.title ?? '').trim()) return;
     try {
       hermesHaptic(HapticIntent.success);
