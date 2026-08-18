@@ -1050,6 +1050,44 @@ class SessionSyncRepository {
   Future<({HermesSession session, bool created})> openBotChat(
     HermesBotProfile bot,
   ) async {
+    final migrated = await _migrateLegacyHealthCoach(bot);
+    return _openBotChat(migrated);
+  }
+
+  /// Convert profiles created by the retired Health Coach switch to the
+  /// ordinary Apple Health toolset. Skills only teach the model how to use a
+  /// tool; the toolset is what actually exposes it to a runtime. Saving the
+  /// standard capability also pins a fresh session because tool schemas are
+  /// immutable for the lifetime of a session.
+  Future<HermesBotProfile> _migrateLegacyHealthCoach(
+    HermesBotProfile bot,
+  ) async {
+    final rawUi = bot.raw['ui_meta'];
+    final rawMeta = rawUi is Map ? rawUi['hermes-bots'] : null;
+    if (rawMeta is! Map || rawMeta['healthCoach'] != true) return bot;
+
+    final described = await describeBotProfile(bot.name);
+    final enabledToolsets = described.toolsets
+        .where((toolset) => toolset.enabled)
+        .map((toolset) => toolset.name)
+        .toList();
+    if (!enabledToolsets.contains('apple_health')) {
+      enabledToolsets.add('apple_health');
+    }
+    return updateBot(
+      bot: bot,
+      title: bot.displayName,
+      description: bot.description ?? '',
+      shape: bot.shape ?? 'circle',
+      color: bot.color ?? '#f97316',
+      usePhoto: bot.usesImageAvatar,
+      enabledToolsets: enabledToolsets,
+    );
+  }
+
+  Future<({HermesSession session, bool created})> _openBotChat(
+    HermesBotProfile bot,
+  ) async {
     final profile = bot.name.trim();
     if (profile.isEmpty) throw StateError('Bot profile name is missing');
     final listed = await gatewayRequest('session.list', {

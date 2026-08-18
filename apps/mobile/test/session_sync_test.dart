@@ -451,42 +451,55 @@ void main() {
     },
   );
 
-  test('opening a legacy Health Coach does not rewrite its profile', () async {
-    final realtime = _BotRealtime(
-      repo,
-      soul:
-          '# Fitness Coach\n\n**Role:** Fitness Coach\n\nYou are Fitness Coach, a persistent named agent (profile `coach`) on this machine.\nYou keep your own memory, skills, and conversation history across sessions.',
-      hidePinnedFromList: true,
-    );
-    repo.bindRealtime(realtime);
-    addTearDown(realtime.dispose);
-    final bot = HermesBotProfile.fromJson({
-      'name': 'coach',
-      'description': 'Daily health trends',
-      'model': 'gpt-5.6-terra',
-      'provider': 'openai-codex',
-      'ui_meta': {
-        'hermes-bots': {
-          'title': 'Fitness Coach',
-          'chat': 'old-chat',
-          'healthCoach': true,
+  test(
+    'opening a legacy Health Coach enables the standard toolset once',
+    () async {
+      final realtime = _BotRealtime(
+        repo,
+        soul:
+            '# Fitness Coach\n\n**Role:** Fitness Coach\n\nYou are Fitness Coach, a persistent named agent (profile `coach`) on this machine.\nYou keep your own memory, skills, and conversation history across sessions.',
+        hidePinnedFromList: true,
+      );
+      repo.bindRealtime(realtime);
+      addTearDown(realtime.dispose);
+      final bot = HermesBotProfile.fromJson({
+        'name': 'coach',
+        'description': 'Daily health trends',
+        'model': 'gpt-5.6-terra',
+        'provider': 'openai-codex',
+        'ui_meta': {
+          'hermes-bots': {
+            'title': 'Fitness Coach',
+            'chat': 'old-chat',
+            'healthCoach': true,
+          },
         },
-      },
-    });
+      });
 
-    final target = await repo.openBotChat(bot);
+      final target = await repo.openBotChat(bot);
 
-    expect(target.created, isFalse);
-    expect(target.session.id, 'old-chat');
-    expect(
-      realtime.calls.where((call) => call.method == 'session.create'),
-      isEmpty,
-    );
-    expect(
-      realtime.calls.where((call) => call.params['soul'] != null),
-      isEmpty,
-    );
-  });
+      expect(target.created, isFalse);
+      expect(target.session.id, 'fresh-health-chat');
+      expect(
+        realtime.calls.where((call) => call.method == 'session.create'),
+        hasLength(1),
+      );
+      final capabilitySave = realtime.calls.firstWhere(
+        (call) => call.params['enabled_toolsets'] != null,
+      );
+      expect(capabilitySave.params['enabled_toolsets'], [
+        'web',
+        'apple_health',
+      ]);
+      final repin = realtime.calls.lastWhere(
+        (call) => call.method == 'profiles.configure',
+      );
+      final metadata = (repin.params['ui_meta'] as Map)['hermes-bots'] as Map;
+      expect(metadata['chat'], 'fresh-health-chat');
+      expect(metadata, isNot(contains('healthCoach')));
+      expect(metadata, isNot(contains('healthRoutingVersion')));
+    },
+  );
 
   test(
     'bot editing preserves identity metadata and updates server profile',
