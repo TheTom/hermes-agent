@@ -3,6 +3,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'package:hermes_mobile/core/models/hermes_models.dart';
 import 'package:hermes_mobile/core/providers.dart';
+import 'package:hermes_mobile/features/bots/bot_avatar.dart';
+import 'package:hermes_mobile/features/bots/bot_sessions_sheet.dart';
 
 Future<void> showBotGroupChatSheet(
   BuildContext context, {
@@ -38,18 +40,36 @@ class _BotGroupChatSheet extends ConsumerWidget {
           children: [
             Padding(
               padding: const EdgeInsets.fromLTRB(20, 4, 20, 12),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
+              child: Row(
                 children: [
-                  Text(group, style: theme.textTheme.headlineSmall),
-                  const SizedBox(height: 4),
-                  Text(
-                    memberNames,
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                    style: theme.textTheme.bodySmall?.copyWith(
-                      color: theme.colorScheme.onSurface.withValues(alpha: 0.6),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(group, style: theme.textTheme.headlineSmall),
+                        const SizedBox(height: 4),
+                        Text(
+                          memberNames.isEmpty
+                              ? 'Membership is waiting to sync'
+                              : memberNames,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: theme.textTheme.bodySmall?.copyWith(
+                            color: theme.colorScheme.onSurface.withValues(
+                              alpha: 0.6,
+                            ),
+                          ),
+                        ),
+                      ],
                     ),
+                  ),
+                  const SizedBox(width: 10),
+                  TextButton.icon(
+                    onPressed: members.isEmpty
+                        ? null
+                        : () => _showGroupMemberSessions(context, members),
+                    icon: const Icon(Icons.forum_outlined, size: 18),
+                    label: const Text('Sessions'),
                   ),
                 ],
               ),
@@ -73,13 +93,13 @@ class _BotGroupChatSheet extends ConsumerWidget {
                           ),
                           const SizedBox(height: 14),
                           Text(
-                            'No synced group messages yet',
+                            'No group history synced yet',
                             textAlign: TextAlign.center,
                             style: theme.textTheme.titleMedium,
                           ),
                           const SizedBox(height: 8),
                           Text(
-                            'Open this group in Hermes Desktop once to migrate its existing room history to the gateway.',
+                            'Pull down to check again. Existing room history appears after an updated Hermes Desktop opens this group on the same gateway.',
                             textAlign: TextAlign.center,
                             style: theme.textTheme.bodyMedium?.copyWith(
                               color: theme.colorScheme.onSurface.withValues(
@@ -101,7 +121,7 @@ class _BotGroupChatSheet extends ConsumerWidget {
             Padding(
               padding: const EdgeInsets.fromLTRB(20, 8, 20, 14),
               child: Text(
-                'Group history is synced through your authenticated Hermes gateway.',
+                'This is one persistent group room. Use Sessions above to continue or start an individual bot session.',
                 textAlign: TextAlign.center,
                 style: theme.textTheme.labelSmall?.copyWith(
                   color: theme.colorScheme.onSurface.withValues(alpha: 0.5),
@@ -113,6 +133,48 @@ class _BotGroupChatSheet extends ConsumerWidget {
       ),
     );
   }
+}
+
+Future<void> _showGroupMemberSessions(
+  BuildContext context,
+  List<HermesBotProfile> members,
+) async {
+  final selected = await showModalBottomSheet<HermesBotProfile>(
+    context: context,
+    showDragHandle: true,
+    builder: (pickerContext) => SafeArea(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          const Padding(
+            padding: EdgeInsets.fromLTRB(20, 0, 20, 8),
+            child: Text(
+              'Bot sessions',
+              style: TextStyle(fontSize: 20, fontWeight: FontWeight.w600),
+            ),
+          ),
+          const Padding(
+            padding: EdgeInsets.fromLTRB(20, 0, 20, 10),
+            child: Text(
+              'Choose a bot to continue a session or start a new one.',
+            ),
+          ),
+          for (final member in members)
+            ListTile(
+              leading: BotAvatar(bot: member),
+              title: Text(member.displayName),
+              subtitle: Text('@${member.handle}'),
+              trailing: const Icon(Icons.chevron_right),
+              onTap: () => Navigator.pop(pickerContext, member),
+            ),
+          const SizedBox(height: 10),
+        ],
+      ),
+    ),
+  );
+  if (selected == null || !context.mounted) return;
+  await showBotSessionsSheet(context, bot: selected);
 }
 
 class _GroupMessageBubble extends StatelessWidget {

@@ -7,8 +7,8 @@ import 'package:hermes_mobile/core/models/hermes_models.dart';
 import 'package:hermes_mobile/core/providers.dart';
 import 'package:hermes_mobile/features/bots/bot_avatar.dart';
 import 'package:hermes_mobile/features/bots/bot_cronjobs_sheet.dart';
-import 'package:hermes_mobile/features/bots/bot_group_sheet.dart';
 import 'package:hermes_mobile/features/bots/bot_group_chat_sheet.dart';
+import 'package:hermes_mobile/features/bots/bot_group_sheet.dart';
 import 'package:hermes_mobile/features/bots/bot_sessions_sheet.dart';
 import 'package:hermes_mobile/features/bots/create_bot_sheet.dart';
 import 'package:hermes_mobile/features/bots/edit_bot_sheet.dart';
@@ -151,30 +151,36 @@ class _BotsScreenState extends ConsumerState<BotsScreen> {
   }
 }
 
-class BotRosterSection {
-  const BotRosterSection({required this.group, required this.bots});
+class BotGroupEntry {
+  const BotGroupEntry({required this.group, required this.bots, this.room});
 
-  final String? group;
+  final String group;
   final List<HermesBotProfile> bots;
+  final HermesBotGroupRoom? room;
 }
 
-List<BotRosterSection> botRosterSections(List<HermesBotProfile> bots) {
-  final ungrouped = <HermesBotProfile>[];
+/// Group-chat entries are additive to the bot roster. A bot remains visible
+/// in the top-level list even while it participates in one of these rooms.
+List<BotGroupEntry> botGroupEntries(
+  List<HermesBotProfile> bots,
+  Map<String, HermesBotGroupRoom> rooms,
+) {
   final grouped = <String, List<HermesBotProfile>>{};
   for (final bot in bots) {
     final group = bot.group?.trim() ?? '';
-    if (group.isEmpty) {
-      ungrouped.add(bot);
-    } else {
+    if (group.isNotEmpty) {
       grouped.putIfAbsent(group, () => []).add(bot);
     }
   }
-  final names = grouped.keys.toList()
+  final names = <String>{...grouped.keys, ...rooms.keys}.toList()
     ..sort((a, b) => a.toLowerCase().compareTo(b.toLowerCase()));
   return [
-    if (ungrouped.isNotEmpty) BotRosterSection(group: null, bots: ungrouped),
     for (final name in names)
-      BotRosterSection(group: name, bots: grouped[name]!),
+      BotGroupEntry(
+        group: name,
+        bots: grouped[name] ?? const [],
+        room: rooms[name],
+      ),
   ];
 }
 
@@ -186,54 +192,21 @@ class _BotRosterList extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final children = <Widget>[];
-    for (final section in botRosterSections(profiles)) {
-      if (section.group != null) {
-        children.add(
-          Padding(
-            padding: const EdgeInsets.fromLTRB(16, 18, 16, 4),
-            child: Row(
-              children: [
-                Text(
-                  section.group!.toUpperCase(),
-                  style: theme.textTheme.labelSmall?.copyWith(
-                    letterSpacing: 1.2,
-                    fontWeight: FontWeight.w700,
-                    color: theme.colorScheme.onSurface.withValues(alpha: 0.55),
-                  ),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Divider(
-                    color: theme.colorScheme.primary.withValues(alpha: 0.35),
-                  ),
-                ),
-                if (section.bots.length > 1) ...[
-                  const SizedBox(width: 6),
-                  TextButton.icon(
-                    onPressed: () => showBotGroupChatSheet(
-                      context,
-                      group: section.group!,
-                      members: section.bots,
-                    ),
-                    icon: Icon(
-                      groupRooms[section.group]?.messages.isNotEmpty == true
-                          ? Icons.forum
-                          : Icons.forum_outlined,
-                      size: 16,
-                    ),
-                    label: const Text('Open chat'),
-                  ),
-                ],
-              ],
-            ),
-          ),
-        );
+    final groups = botGroupEntries(profiles, groupRooms);
+    final children = <Widget>[
+      _RosterHeading(label: 'Bots', count: profiles.length),
+    ];
+    for (var index = 0; index < profiles.length; index++) {
+      children.add(_BotTile(bot: profiles[index]));
+      if (index < profiles.length - 1) {
+        children.add(const Divider(height: 1, indent: 76));
       }
-      for (var index = 0; index < section.bots.length; index++) {
-        children.add(_BotTile(bot: section.bots[index]));
-        if (index < section.bots.length - 1) {
+    }
+    if (groups.isNotEmpty) {
+      children.add(_RosterHeading(label: 'Group chats', count: groups.length));
+      for (var index = 0; index < groups.length; index++) {
+        children.add(_BotGroupTile(entry: groups[index]));
+        if (index < groups.length - 1) {
           children.add(const Divider(height: 1, indent: 76));
         }
       }
@@ -241,6 +214,109 @@ class _BotRosterList extends StatelessWidget {
     return ListView(
       physics: const AlwaysScrollableScrollPhysics(),
       children: children,
+    );
+  }
+}
+
+class _RosterHeading extends StatelessWidget {
+  const _RosterHeading({required this.label, required this.count});
+
+  final String label;
+  final int count;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 18, 16, 5),
+      child: Row(
+        children: [
+          Text(
+            label.toUpperCase(),
+            style: theme.textTheme.labelSmall?.copyWith(
+              letterSpacing: 1.2,
+              fontWeight: FontWeight.w700,
+              color: theme.colorScheme.onSurface.withValues(alpha: 0.55),
+            ),
+          ),
+          const SizedBox(width: 7),
+          Text(
+            '$count',
+            style: theme.textTheme.labelSmall?.copyWith(
+              color: theme.colorScheme.onSurface.withValues(alpha: 0.45),
+            ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Divider(
+              color: theme.colorScheme.primary.withValues(alpha: 0.3),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _BotGroupTile extends StatelessWidget {
+  const _BotGroupTile({required this.entry});
+
+  final BotGroupEntry entry;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final messages = entry.room?.messages ?? const <HermesBotGroupMessage>[];
+    final last = messages.isEmpty ? null : messages.last;
+    final memberNames = entry.bots.map((bot) => bot.displayName).join(', ');
+    final when = last?.at == null
+        ? null
+        : formatSessionRelative(
+            DateTime.fromMillisecondsSinceEpoch(last!.at!).toIso8601String(),
+          );
+    final subtitle = last != null
+        ? '${last.name}: ${last.text}'
+        : (memberNames.isNotEmpty
+              ? memberNames
+              : 'Room membership is waiting to sync');
+
+    return ListTile(
+      contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      onTap: () => showBotGroupChatSheet(
+        context,
+        group: entry.group,
+        members: entry.bots,
+      ),
+      leading: CircleAvatar(
+        backgroundColor: theme.colorScheme.primaryContainer,
+        foregroundColor: theme.colorScheme.onPrimaryContainer,
+        child: const Icon(Icons.groups_outlined),
+      ),
+      title: Text(
+        entry.group,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: const TextStyle(fontWeight: FontWeight.w600),
+      ),
+      subtitle: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const SizedBox(height: 3),
+          Text(subtitle, maxLines: 2, overflow: TextOverflow.ellipsis),
+          const SizedBox(height: 3),
+          Text(
+            [
+              '${entry.bots.length} ${entry.bots.length == 1 ? 'bot' : 'bots'}',
+              when,
+              if (entry.room == null) 'History not synced yet',
+            ].whereType<String>().join(' · '),
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: theme.colorScheme.onSurface.withValues(alpha: 0.55),
+            ),
+          ),
+        ],
+      ),
+      trailing: const Icon(Icons.chevron_right),
     );
   }
 }

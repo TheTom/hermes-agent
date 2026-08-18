@@ -14,20 +14,37 @@ HermesBotProfile _bot(String name, {String? group}) {
 }
 
 void main() {
-  test('bot roster keeps ungrouped first and sorts group sections', () {
-    final sections = botRosterSections([
-      _bot('one'),
-      _bot('fitness', group: 'Health and Fitness'),
-      _bot('work', group: 'Admin'),
-      _bot('sleep', group: 'Health and Fitness'),
-    ]);
+  test('group chats are additive and do not remove bots from the roster', () {
+    final bots = [
+      for (var index = 1; index <= 5; index++) _bot('bot-$index'),
+      for (var index = 6; index <= 9; index++)
+        _bot('bot-$index', group: 'Review team'),
+    ];
 
-    expect(sections.map((section) => section.group), [
-      null,
-      'Admin',
-      'Health and Fitness',
+    final groups = botGroupEntries(bots, const {});
+
+    expect(bots, hasLength(9));
+    expect(groups, hasLength(1));
+    expect(groups.single.group, 'Review team');
+    expect(groups.single.bots.map((bot) => bot.name), [
+      'bot-6',
+      'bot-7',
+      'bot-8',
+      'bot-9',
     ]);
-    expect(sections[2].bots.map((bot) => bot.name), ['fitness', 'sleep']);
+  });
+
+  test('synced group rooms remain visible while membership is catching up', () {
+    final room = HermesBotGroupRoom.fromJson('Remote room', {
+      'messages': const [],
+    });
+
+    final groups = botGroupEntries(const [], {'Remote room': room});
+
+    expect(groups, hasLength(1));
+    expect(groups.single.group, 'Remote room');
+    expect(groups.single.bots, isEmpty);
+    expect(groups.single.room, same(room));
   });
 
   test('session pins keep the requested session at the top', () {
