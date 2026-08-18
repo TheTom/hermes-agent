@@ -43,6 +43,13 @@ class GatewayAuthClient {
 
   CookieJar get cookieJar => _jar;
 
+  // A reconnect used to construct a fresh PersistCookieJar every time, which
+  // forced another Keychain read immediately before every WS ticket request.
+  // Keep one live jar per saved gateway so ordinary reconnects use the cookies
+  // already loaded in this process. Login, reauth, and disconnect all obtain
+  // this same instance, so their delete/write operations remain authoritative.
+  static final Map<String, Future<PersistCookieJar>> _persistentJars = {};
+
   static String _normalize(String raw) {
     var v = raw.trim();
     while (v.endsWith('/')) {
@@ -61,6 +68,22 @@ class GatewayAuthClient {
   /// (same as Desktop). If we drop expired AT cookies, some hosts only see a
   /// bare RT and still 401 if refresh is not triggered the same way.
   static Future<PersistCookieJar> persistentJar(String gatewayId) async {
+    final cached = _persistentJars[gatewayId];
+    if (cached != null) return cached;
+
+    final created = _createPersistentJar(gatewayId);
+    _persistentJars[gatewayId] = created;
+    try {
+      return await created;
+    } catch (_) {
+      if (identical(_persistentJars[gatewayId], created)) {
+        _persistentJars.remove(gatewayId);
+      }
+      rethrow;
+    }
+  }
+
+  static Future<PersistCookieJar> _createPersistentJar(String gatewayId) async {
     final root = await getApplicationSupportDirectory();
     final safe = gatewayId.replaceAll(RegExp(r'[^a-zA-Z0-9._-]'), '_');
     final dir = Directory('${root.path}/gateway_cookies/$safe');

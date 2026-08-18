@@ -1,5 +1,7 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
+
 /// Serializes every secure-storage platform-channel call app-wide and
 /// exposes when the channel is quiet.
 ///
@@ -18,6 +20,14 @@ import 'dart:async';
 class SecureStorageGate {
   SecureStorageGate._();
 
+  /// A platform-channel Keychain call must never block every future secure
+  /// storage operation for the lifetime of the process. iOS occasionally
+  /// strands a call while switching execution between the foreground app and
+  /// Workmanager's headless engine. Let that individual call fail so the
+  /// serialized queue — and the gateway reconnect loop waiting behind it —
+  /// can continue.
+  static const operationTimeout = Duration(seconds: 15);
+
   static Future<void> _tail = Future<void>.value();
   static int _pending = 0;
 
@@ -26,12 +36,29 @@ class SecureStorageGate {
 
   /// Run [op] after all previously queued ops complete. Errors from earlier
   /// ops never poison the queue; each caller still sees its own op's error.
-  static Future<T> run<T>(Future<T> Function() op) {
+  static Future<T> run<T>(Future<T> Function() op, {Duration? timeout}) {
     _pending += 1;
     final completer = Completer<T>();
     _tail = _tail.then((_) async {
       try {
-        completer.complete(await op());
+        final deadline =
+            timeout ??
+            (!kIsWeb && defaultTargetPlatform == TargetPlatform.iOS
+                ? operationTimeout
+                : null);
+        final pending = Future<T>.sync(op);
+        completer.complete(
+          await (deadline == null
+              ? pending
+              : pending.timeout(
+                  deadline,
+                  onTimeout: () => throw TimeoutException(
+                    'Secure storage did not respond within '
+                    '${deadline.inSeconds}s',
+                    deadline,
+                  ),
+                )),
+        );
       } catch (e, st) {
         completer.completeError(e, st);
       } finally {

@@ -14,6 +14,8 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 class GatewayWsClient {
   GatewayWsClient();
 
+  static const _closeTimeout = Duration(seconds: 2);
+
   WebSocketChannel? _channel;
   StreamSubscription? _sub;
   final _pending = <Object, Completer<Map<String, dynamic>>>{};
@@ -88,6 +90,13 @@ class GatewayWsClient {
     }
 
     final attempt = Completer<void>();
+    // The initiating caller awaits this method's async body, while concurrent
+    // callers await `attempt.future`. Give the shared future an error handler
+    // immediately so completing it with the same handshake error does not
+    // become an uncaught zone error when there are no concurrent callers.
+    unawaited(
+      attempt.future.then<void>((_) {}, onError: (Object _, StackTrace _) {}),
+    );
     _connectInflight = attempt;
     _url = wsUrl;
     _setState(GatewayWsState.connecting);
@@ -144,12 +153,19 @@ class GatewayWsClient {
   }
 
   Future<void> _hardCloseChannel() async {
-    await _sub?.cancel();
+    final sub = _sub;
     _sub = null;
-    try {
-      await _channel?.sink.close();
-    } catch (_) {}
+    final channel = _channel;
     _channel = null;
+    try {
+      await sub?.cancel().timeout(_closeTimeout);
+    } catch (_) {}
+    try {
+      // A failed iOS/Tailscale handshake can leave the close future pending
+      // just like its open future. Teardown is best-effort and must not hold
+      // the reconnect single-flight lock indefinitely.
+      await channel?.sink.close().timeout(_closeTimeout);
+    } catch (_) {}
   }
 
   Future<void> disconnect() async {

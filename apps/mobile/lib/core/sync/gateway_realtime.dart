@@ -199,6 +199,11 @@ class GatewayRealtime {
   static const maxReconnectAttempts = 12;
   static const maxReconnectWindow = Duration(minutes: 2);
 
+  /// Includes cookie loading plus the ticket POST. Dio already bounds the
+  /// network phases; this outer deadline also covers platform/plugin work
+  /// before the request so `_connectLock` can never remain held forever.
+  static const wsUrlResolutionTimeout = Duration(seconds: 35);
+
   /// Rebind session cache after Riverpod rebuilds the repository instance.
   void bindSessionSync(SessionSyncRepository sync) {
     _sessionSync = sync;
@@ -584,12 +589,20 @@ class GatewayRealtime {
 
     final run = _connectOnceBody();
     _connectLock = run;
+    var connected = false;
     try {
-      return await run;
+      connected = await run;
+      return connected;
     } finally {
       if (identical(_connectLock, run)) {
         _connectLock = null;
       }
+      // Failure handlers run inside `_connectOnceBody`, while this lock is
+      // intentionally held. Scheduling there was therefore discarded by
+      // `_scheduleReconnect`'s single-flight guard. Schedule only after the
+      // owner releases the lock so a failed ticket request or handshake
+      // always advances the retry loop.
+      if (!connected) _scheduleReconnect();
     }
   }
 
@@ -602,13 +615,18 @@ class GatewayRealtime {
     String wsUrl;
     try {
       // Mint ticket immediately before open — tickets are single-use + 30s TTL.
-      wsUrl = await _resolveWsUrl();
+      wsUrl = await _resolveWsUrl().timeout(
+        wsUrlResolutionTimeout,
+        onTimeout: () => throw TimeoutException(
+          'WebSocket ticket preparation timed out after '
+          '${wsUrlResolutionTimeout.inSeconds}s',
+          wsUrlResolutionTimeout,
+        ),
+      );
     } catch (e) {
       lastError = 'Could not mint WS ticket: $e';
       debugPrint('GatewayRealtime: $lastError');
       _notifyState();
-      // Auth death stops the loop (handled in _signalReauth).
-      if (_wantConnected) _scheduleReconnect();
       return false;
     }
     try {
@@ -621,7 +639,6 @@ class GatewayRealtime {
       if (!_client.isOpen) {
         lastError = 'WebSocket finished handshake but is not open';
         _notifyState();
-        _scheduleReconnect();
         return false;
       }
       await _events?.cancel();
@@ -669,7 +686,6 @@ class GatewayRealtime {
       lastError = 'WebSocket connect failed: $e';
       debugPrint('GatewayRealtime: $lastError');
       _notifyState();
-      _scheduleReconnect();
       return false;
     }
   }
