@@ -95,7 +95,7 @@ function load(turnScript) {
     .replace(/^import .* from 'react\/jsx-runtime'\r?\n/m, '')
     .replace('export default {', 'globalThis.plugin = {')
     .concat(
-      '\nglobalThis.__gc = { sendToGroupChat, runGroupChatRounds, harvestStrandedGroupReply, resolveGroupResponders, parseGroupChatMentions, rotateGroupSpeakers, isGroupPassText, formatGroupChatLine, buildGroupChatTurnPrompt, trimGroupChatLog, groupChatSyncSnapshot, groupChatGatewayJsonSize, scheduleGroupChatServerSync, disbandGroupChat, updateGroupChat, $groupChats, $groupNeedsYou, $groupChatWorkspace, $botMeta, GROUP_CHAT_MAX_ROUNDS, GROUP_CHAT_MAX_MESSAGES };\n'
+      '\nglobalThis.__gc = { sendToGroupChat, runGroupChatRounds, harvestStrandedGroupReply, resolveGroupResponders, parseGroupChatMentions, rotateGroupSpeakers, isGroupPassText, formatGroupChatLine, buildGroupChatTurnPrompt, trimGroupChatLog, groupChatSyncSnapshot, groupChatGatewayJsonSize, mergeGroupChatSyncSnapshots, scheduleGroupChatServerSync, disbandGroupChat, updateGroupChat, $groupChats, $groupNeedsYou, $groupChatWorkspace, $botMeta, GROUP_CHAT_MAX_ROUNDS, GROUP_CHAT_MAX_MESSAGES };\n'
     )
   vm.runInNewContext(source, context, { filename: 'plugin.js' })
   const storageWrites = new Map()
@@ -410,13 +410,63 @@ test('an empty hydrate cannot erase a shared gateway room mirror', () => {
   assert.equal(gc.requests.length, before)
 })
 
-test('an explicit final-room disband may clear the gateway room mirror', () => {
+test('an explicit final-room disband may clear the gateway room mirror', async () => {
   const gc = load(() => '(pass)')
 
-  gc.scheduleGroupChatServerSync({}, { allowEmpty: true })
+  gc.scheduleGroupChatServerSync({}, { allowEmpty: true, deletedRooms: ['Research'] })
+  await new Promise(resolve => setImmediate(resolve))
 
   const configure = gc.requests.filter(call => call.method === 'profiles.configure').at(-1)
   assert.deepEqual(Object.keys(configure.params.ui_meta['hermes-bots-groups'].rooms), [])
+  assert.ok(configure.params.ui_meta['hermes-bots-groups'].deleted.Research > 0)
+})
+
+test('pull-before-push merge preserves disjoint rooms, messages, and members', () => {
+  const gc = load(() => '(pass)')
+  const merged = gc.mergeGroupChatSyncSnapshots(
+    {
+      version: 1,
+      rooms: {
+        Shared: {
+          log: [{ from: { kind: 'user', name: 'You' }, text: 'remote', at: 1, thread: 'one' }],
+          members: [{ name: 'research', handle: 'research' }]
+        },
+        RemoteOnly: {
+          log: [{ from: { kind: 'member', name: 'ops' }, text: 'kept', at: 2 }],
+          members: [{ name: 'ops' }]
+        }
+      }
+    },
+    {
+      version: 1,
+      rooms: {
+        Shared: {
+          log: [{ from: { kind: 'member', name: 'builder' }, text: 'local', at: 3, thread: 'one' }],
+          members: [{ name: 'builder', handle: 'builder' }]
+        }
+      }
+    }
+  )
+
+  assert.equal(JSON.stringify(merged.rooms.Shared.log.map(entry => entry.text)), JSON.stringify(['remote', 'local']))
+  assert.equal(JSON.stringify(merged.rooms.Shared.members.map(member => member.name)), JSON.stringify(['research', 'builder']))
+  assert.equal(merged.rooms.RemoteOnly.log[0].text, 'kept')
+})
+
+test('room deletion tombstone wins over stale history but not a later recreation', () => {
+  const gc = load(() => '(pass)')
+  const stale = gc.mergeGroupChatSyncSnapshots(
+    { rooms: { Research: { log: [{ from: { kind: 'user', name: 'You' }, text: 'old', at: 10 }] } } },
+    { rooms: {}, deleted: { Research: 20 } }
+  )
+  assert.equal(stale.rooms.Research, undefined)
+  assert.equal(stale.deleted.Research, 20)
+
+  const recreated = gc.mergeGroupChatSyncSnapshots(stale, {
+    rooms: { Research: { log: [{ from: { kind: 'user', name: 'You' }, text: 'new', at: 30 }] } }
+  })
+  assert.equal(recreated.rooms.Research.log[0].text, 'new')
+  assert.equal(recreated.deleted, undefined)
 })
 
 test('source contract: workspace + main-window door + prompt rules are wired', () => {

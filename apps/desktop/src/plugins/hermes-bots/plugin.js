@@ -193,6 +193,11 @@ const GROUP_CHAT_SYNC_MAX_BYTES = 48000
 const GROUP_CHAT_SYNC_MESSAGES = 16
 const GROUP_CHAT_SYNC_TEXT_CHARS = 1200
 let groupChatSyncTimer = null
+let groupChatSyncRetryTimer = null
+let groupChatSyncPending = null
+let groupChatSyncInFlight = false
+let groupChatSyncRetryCount = 0
+let groupChatSyncDisposed = false
 
 /** Conservative byte count for the gateway's ensure_ascii JSON encoding.
  *  Python also inserts separator spaces, so reserve one extra byte per JS
@@ -221,7 +226,7 @@ function groupChatGatewayJsonSize(value) {
  *  The live orchestration state stays in plugin storage; this bounded mirror
  *  rides the default profile's ui_meta so mobile can show the same messages.
  *  Newest rooms/messages win when the profile metadata size cap is reached. */
-function groupChatSyncSnapshot(all = $groupChats.get()) {
+function groupChatSyncSnapshot(all = $groupChats.get(), deleted = {}) {
   const ranked = Object.entries(all || {})
     // Empty runtime tombstones are used to stop an in-flight room after
     // disband. They are not real rooms and must never reappear on mobile.
@@ -232,7 +237,17 @@ function groupChatSyncSnapshot(all = $groupChats.get()) {
       return rightAt - leftAt
     })
   const rooms = {}
-  const envelope = { version: 1, updatedAt: Date.now(), rooms }
+  const boundedDeleted = Object.fromEntries(
+    Object.entries(deleted)
+      .sort(([, left], [, right]) => Number(right || 0) - Number(left || 0))
+      .slice(0, 64)
+  )
+  const envelope = {
+    version: 1,
+    updatedAt: Date.now(),
+    rooms,
+    ...(Object.keys(boundedDeleted).length ? { deleted: boundedDeleted } : {})
+  }
 
   for (const [name, room] of ranked) {
     const log = room.log.slice(-GROUP_CHAT_SYNC_MESSAGES).map(entry => ({
@@ -250,7 +265,10 @@ function groupChatSyncSnapshot(all = $groupChats.get()) {
       members: (Array.isArray(room.members) ? room.members : []).slice(0, GROUP_CHAT_MAX_MEMBERS).map(member => ({
         name: String(member?.name || '').slice(0, 128),
         ...(member?.handle ? { handle: String(member.handle).slice(0, 128) } : {}),
-        ...(member?.connectionLabel ? { connectionLabel: String(member.connectionLabel).slice(0, 128) } : {})
+        ...(member?.connectionId ? { connectionId: String(member.connectionId).slice(0, 128) } : {}),
+        ...(member?.connectionKind ? { connectionKind: String(member.connectionKind).slice(0, 64) } : {}),
+        ...(member?.connectionLabel ? { connectionLabel: String(member.connectionLabel).slice(0, 128) } : {}),
+        ...(member?.sourceScoped ? { sourceScoped: true } : {})
       }))
     }
 
@@ -266,16 +284,183 @@ function groupChatSyncSnapshot(all = $groupChats.get()) {
   return envelope
 }
 
-/** Debounced best-effort server mirror. Older gateways reject ui_meta and
- *  Desktop's local room remains authoritative, preserving compatibility. */
-function scheduleGroupChatServerSync(all = $groupChats.get(), { allowEmpty = false } = {}) {
+function groupChatSyncEntryKey(entry) {
+  return JSON.stringify([
+    Number(entry?.at || 0),
+    String(entry?.from?.kind || ''),
+    String(entry?.from?.name || ''),
+    String(entry?.from?.source || ''),
+    String(entry?.thread || ''),
+    String(entry?.text || '')
+  ])
+}
+
+function groupChatSyncMemberKey(member) {
+  return JSON.stringify([
+    String(member?.source || ''),
+    String(member?.connectionId || ''),
+    String(member?.connectionLabel || ''),
+    String(member?.handle || ''),
+    String(member?.name || '')
+  ])
+}
+
+/** Merge two bounded projections without treating an absent room/message as
+ *  deletion. Explicit tombstones win until a genuinely newer room message
+ *  recreates the same name. */
+function mergeGroupChatSyncSnapshots(remote, local) {
+  const rooms = {}
+  const deleted = {}
+
+  for (const source of [remote, local]) {
+    for (const [name, at] of Object.entries(source?.deleted || {})) {
+      deleted[name] = Math.max(Number(deleted[name] || 0), Number(at || 0))
+    }
+  }
+
+  for (const source of [remote, local]) {
+    for (const [name, room] of Object.entries(source?.rooms || {})) {
+      if (!room || !Array.isArray(room.log)) {
+        continue
+      }
+      const current = rooms[name] || { log: [], members: [] }
+      const entries = new Map(current.log.map(entry => [groupChatSyncEntryKey(entry), entry]))
+      const members = new Map(current.members.map(member => [groupChatSyncMemberKey(member), member]))
+
+      for (const entry of room.log) {
+        entries.set(groupChatSyncEntryKey(entry), entry)
+      }
+      for (const member of Array.isArray(room.members) ? room.members : []) {
+        members.set(groupChatSyncMemberKey(member), member)
+      }
+      rooms[name] = {
+        log: [...entries.values()].sort((left, right) => {
+          const byTime = Number(left?.at || 0) - Number(right?.at || 0)
+          return byTime || groupChatSyncEntryKey(left).localeCompare(groupChatSyncEntryKey(right))
+        }),
+        members: [...members.values()]
+      }
+    }
+  }
+
+  for (const [name, deletedAt] of Object.entries(deleted)) {
+    const latestMessageAt = Math.max(0, ...(rooms[name]?.log || []).map(entry => Number(entry?.at || 0)))
+    if (Number(deletedAt || 0) >= latestMessageAt) {
+      delete rooms[name]
+    } else {
+      delete deleted[name]
+    }
+  }
+
+  return groupChatSyncSnapshot(rooms, deleted)
+}
+
+function groupChatSyncConnectionId() {
+  return String(host.state.connectionId?.get?.() || host.activeConnectionId?.() || '')
+}
+
+/** Route a sync job back to the gateway that was active when it was queued.
+ *  A foreground switch during debounce must not write the old snapshot into
+ *  the newly active gateway. */
+async function groupChatSyncRequest(job, method, params) {
+  if (job.connectionId && typeof host.profileRoutes === 'function' && typeof host.requestProfile === 'function') {
+    const routes = await host.profileRoutes()
+    const route = (Array.isArray(routes) ? routes : []).find(candidate => {
+      const profile = String(candidate?.targetProfile || candidate?.profile || '')
+      return String(candidate?.connectionId || '') === job.connectionId && profile === 'default'
+    })
+
+    if (route) {
+      return host.requestProfile(route, method, params)
+    }
+  }
+
+  const currentConnectionId = groupChatSyncConnectionId()
+  if (job.connectionId && currentConnectionId && job.connectionId !== currentConnectionId) {
+    throw new Error('Group chat gateway changed before sync')
+  }
+  return host.request(method, params)
+}
+
+async function groupChatRemoteSnapshot(job) {
+  const result = await groupChatSyncRequest(job, 'profiles.list', { include_sessions: false })
+  const profile = (Array.isArray(result?.profiles) ? result.profiles : []).find(row => row?.name === 'default')
+  const snapshot = profile?.ui_meta?.[GROUP_CHAT_SYNC_META_KEY]
+  return snapshot && typeof snapshot === 'object' && !Array.isArray(snapshot) ? snapshot : null
+}
+
+function groupChatSyncBackoff() {
+  return Math.min(30000, 1000 * 2 ** Math.min(groupChatSyncRetryCount, 5))
+}
+
+async function flushGroupChatServerSync() {
+  if (groupChatSyncDisposed || groupChatSyncInFlight || !groupChatSyncPending) {
+    return
+  }
+  const job = groupChatSyncPending
+  groupChatSyncPending = null
+  groupChatSyncInFlight = true
+
+  try {
+    const remote = await groupChatRemoteSnapshot(job)
+    const snapshot = mergeGroupChatSyncSnapshots(remote, job.snapshot)
+    const result = await groupChatSyncRequest(job, 'profiles.configure', {
+      name: 'default',
+      ui_meta: { [GROUP_CHAT_SYNC_META_KEY]: snapshot }
+    })
+
+    if (result?.applied && result.applied.ui_meta !== true) {
+      throw new Error('Gateway rejected group chat ui_meta')
+    }
+
+    const confirmed = await groupChatRemoteSnapshot(job)
+    if (confirmed && Number(confirmed.updatedAt || 0) !== Number(snapshot.updatedAt || 0)) {
+      throw new Error('Group chat ui_meta changed before read-back')
+    }
+    groupChatSyncRetryCount = 0
+  } catch {
+    if (!groupChatSyncDisposed) {
+      groupChatSyncPending ||= job
+      groupChatSyncRetryCount += 1
+      if (typeof setTimeout === 'function' && groupChatSyncRetryTimer === null) {
+        groupChatSyncRetryTimer = setTimeout(() => {
+          groupChatSyncRetryTimer = null
+          void flushGroupChatServerSync()
+        }, groupChatSyncBackoff())
+      }
+    }
+  } finally {
+    groupChatSyncInFlight = false
+    if (groupChatSyncPending && groupChatSyncRetryTimer === null && !groupChatSyncDisposed) {
+      void flushGroupChatServerSync()
+    }
+  }
+}
+
+function stopGroupChatServerSync() {
+  groupChatSyncDisposed = true
+  groupChatSyncPending = null
+  if (groupChatSyncTimer !== null) {
+    clearTimeout(groupChatSyncTimer)
+    groupChatSyncTimer = null
+  }
+  if (groupChatSyncRetryTimer !== null) {
+    clearTimeout(groupChatSyncRetryTimer)
+    groupChatSyncRetryTimer = null
+  }
+}
+
+/** Debounced, pull-merge-write server mirror. Local storage keeps the complete
+ *  orchestration log; ui_meta is a bounded cross-client projection. */
+function scheduleGroupChatServerSync(all = $groupChats.get(), { allowEmpty = false, deletedRooms = [] } = {}) {
   // Browser shells provide timers; source-level VM tests and older embedded
   // hosts may not. Room persistence must never break the surrounding gateway
   // lifecycle when the optional mirror cannot be scheduled.
   if (typeof setTimeout !== 'function') {
     return
   }
-  const snapshot = groupChatSyncSnapshot(all)
+  const deleted = Object.fromEntries(deletedRooms.map(name => [name, Date.now()]))
+  const snapshot = groupChatSyncSnapshot(all, deleted)
   // A newly installed Desktop has no local room cache. Publishing that empty
   // state on hydrate/reconnect would erase a valid mirror produced elsewhere.
   // Only an explicit final-room disband is allowed to clear the projection.
@@ -285,16 +470,14 @@ function scheduleGroupChatServerSync(all = $groupChats.get(), { allowEmpty = fal
   if (groupChatSyncTimer !== null) {
     clearTimeout(groupChatSyncTimer)
   }
+  if (groupChatSyncRetryTimer !== null) {
+    clearTimeout(groupChatSyncRetryTimer)
+    groupChatSyncRetryTimer = null
+  }
+  groupChatSyncPending = { snapshot, connectionId: groupChatSyncConnectionId() }
   groupChatSyncTimer = setTimeout(() => {
     groupChatSyncTimer = null
-    try {
-      Promise.resolve(host.request('profiles.configure', {
-        name: 'default',
-        ui_meta: { [GROUP_CHAT_SYNC_META_KEY]: snapshot }
-      })).catch(() => undefined)
-    } catch {
-      /* older/unavailable gateway — plugin storage remains authoritative */
-    }
+    void flushGroupChatServerSync()
   }, 350)
 }
 
@@ -3689,7 +3872,7 @@ async function disbandGroupChat(group, members) {
   } catch {
     /* storage unavailable — the atom reset above still empties the room */
   }
-  scheduleGroupChatServerSync($groupChats.get(), { allowEmpty: true })
+  scheduleGroupChatServerSync($groupChats.get(), { allowEmpty: true, deletedRooms: [group] })
 
   // Remove this membership last. saveBotMeta never throws (local storage +
   // best-effort profiles.configure per member), so a flaky gateway can't
@@ -8907,6 +9090,7 @@ export default {
   description: 'Bot Mode — a one-chat-per-agent roster with avatars, routines, group chats, and bot-to-bot messaging. Ships with the app; disable here if unwanted.',
   register(ctx) {
     pluginCtx = ctx
+    groupChatSyncDisposed = false
     startFaceClock()
     // Disabling the plugin (or a hot reload) must actually stop the clock —
     // before this, the rAF loop + 1Hz document scan ran until app restart.
@@ -9058,6 +9242,7 @@ export default {
 
     if (typeof ctx.onDispose === 'function') {
       ctx.onDispose(() => {
+        stopGroupChatServerSync()
         if (typeof unbindProfileListener === 'function') {
           unbindProfileListener()
         }
