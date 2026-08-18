@@ -95,7 +95,7 @@ function load(turnScript) {
     .replace(/^import .* from 'react\/jsx-runtime'\r?\n/m, '')
     .replace('export default {', 'globalThis.plugin = {')
     .concat(
-      '\nglobalThis.__gc = { sendToGroupChat, runGroupChatRounds, harvestStrandedGroupReply, resolveGroupResponders, parseGroupChatMentions, rotateGroupSpeakers, isGroupPassText, formatGroupChatLine, buildGroupChatTurnPrompt, trimGroupChatLog, groupChatSyncSnapshot, disbandGroupChat, updateGroupChat, $groupChats, $groupNeedsYou, $groupChatWorkspace, $botMeta, GROUP_CHAT_MAX_ROUNDS, GROUP_CHAT_MAX_MESSAGES };\n'
+      '\nglobalThis.__gc = { sendToGroupChat, runGroupChatRounds, harvestStrandedGroupReply, resolveGroupResponders, parseGroupChatMentions, rotateGroupSpeakers, isGroupPassText, formatGroupChatLine, buildGroupChatTurnPrompt, trimGroupChatLog, groupChatSyncSnapshot, groupChatGatewayJsonSize, scheduleGroupChatServerSync, disbandGroupChat, updateGroupChat, $groupChats, $groupNeedsYou, $groupChatWorkspace, $botMeta, GROUP_CHAT_MAX_ROUNDS, GROUP_CHAT_MAX_MESSAGES };\n'
     )
   vm.runInNewContext(source, context, { filename: 'plugin.js' })
   const storageWrites = new Map()
@@ -353,7 +353,7 @@ test('group room messages and members mirror through bounded gateway profile met
   assert.equal(envelope.version, 1)
   assert.equal(envelope.rooms.Research.log[0].text, 'What changed?')
   assert.equal(JSON.stringify(envelope.rooms.Research.members.map(member => member.name)), JSON.stringify(['research', 'builder']))
-  assert.ok(JSON.stringify(envelope).length <= 60000)
+  assert.ok(gc.groupChatGatewayJsonSize(envelope) <= 48000)
 })
 
 test('group gateway mirror is size bounded and favors recent messages', () => {
@@ -369,10 +369,54 @@ test('group gateway mirror is size bounded and favors recent messages', () => {
     }
   })
 
-  assert.ok(JSON.stringify(snapshot).length <= 60000)
+  assert.ok(gc.groupChatGatewayJsonSize(snapshot) <= 48000)
   assert.ok(snapshot.rooms.Large.log.length <= 16)
   assert.match(snapshot.rooms.Large.log.at(-1).text, /^99:/)
   assert.ok(snapshot.rooms.Large.log.at(-1).text.length <= 1200)
+})
+
+test('group gateway mirror preserves threads and budgets escaped Unicode', () => {
+  const gc = load(() => '(pass)')
+  const snapshot = gc.groupChatSyncSnapshot({
+    Unicode: {
+      log: Array.from({ length: 16 }, (_, index) => ({
+        from: { kind: 'member', name: 'research' },
+        text: `message ${index} ${'🧠'.repeat(1200)}`,
+        at: index,
+        thread: `thread-${index}`
+      }))
+    }
+  })
+
+  assert.ok(gc.groupChatGatewayJsonSize(snapshot) <= 48000)
+  assert.equal(snapshot.rooms.Unicode.log.at(-1).thread, 'thread-15')
+})
+
+test('empty runtime rooms are omitted from the gateway mirror', () => {
+  const gc = load(() => '(pass)')
+  const snapshot = gc.groupChatSyncSnapshot({
+    Disbanded: { log: [], members: [{ name: 'research' }] }
+  })
+
+  assert.deepEqual(Object.keys(snapshot.rooms), [])
+})
+
+test('an empty hydrate cannot erase a shared gateway room mirror', () => {
+  const gc = load(() => '(pass)')
+  const before = gc.requests.length
+
+  gc.scheduleGroupChatServerSync({})
+
+  assert.equal(gc.requests.length, before)
+})
+
+test('an explicit final-room disband may clear the gateway room mirror', () => {
+  const gc = load(() => '(pass)')
+
+  gc.scheduleGroupChatServerSync({}, { allowEmpty: true })
+
+  const configure = gc.requests.filter(call => call.method === 'profiles.configure').at(-1)
+  assert.deepEqual(Object.keys(configure.params.ui_meta['hermes-bots-groups'].rooms), [])
 })
 
 test('source contract: workspace + main-window door + prompt rules are wired', () => {

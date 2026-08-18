@@ -187,10 +187,35 @@ const $groupChatWorkspace = atom(null)
 const $groupNeedsYou = atom({})
 
 const GROUP_CHAT_SYNC_META_KEY = 'hermes-bots-groups'
-const GROUP_CHAT_SYNC_MAX_BYTES = 60000
+// Gateway ui_meta is capped after Python JSON serialization. Keep a healthy
+// margin below that limit because Python escapes Unicode while JS does not.
+const GROUP_CHAT_SYNC_MAX_BYTES = 48000
 const GROUP_CHAT_SYNC_MESSAGES = 16
 const GROUP_CHAT_SYNC_TEXT_CHARS = 1200
 let groupChatSyncTimer = null
+
+/** Conservative byte count for the gateway's ensure_ascii JSON encoding.
+ *  Python also inserts separator spaces, so reserve one extra byte per JS
+ *  structural separator on top of escaped Unicode code-point widths. */
+function groupChatGatewayJsonSize(value) {
+  const json = JSON.stringify(value)
+  let bytes = 0
+
+  for (const character of json) {
+    const codePoint = character.codePointAt(0)
+
+    if (codePoint <= 0x7f) {
+      bytes += 1
+      if (character === ',' || character === ':') {
+        bytes += 1
+      }
+    } else {
+      bytes += codePoint <= 0xffff ? 6 : 12
+    }
+  }
+
+  return bytes
+}
 
 /** Compact, display-oriented copy of Desktop's room log for gateway clients.
  *  The live orchestration state stays in plugin storage; this bounded mirror
@@ -198,7 +223,9 @@ let groupChatSyncTimer = null
  *  Newest rooms/messages win when the profile metadata size cap is reached. */
 function groupChatSyncSnapshot(all = $groupChats.get()) {
   const ranked = Object.entries(all || {})
-    .filter(([, room]) => room && Array.isArray(room.log))
+    // Empty runtime tombstones are used to stop an in-flight room after
+    // disband. They are not real rooms and must never reappear on mobile.
+    .filter(([, room]) => room && Array.isArray(room.log) && room.log.length > 0)
     .sort(([, left], [, right]) => {
       const leftAt = Number(left.log[left.log.length - 1]?.at || 0)
       const rightAt = Number(right.log[right.log.length - 1]?.at || 0)
@@ -215,7 +242,8 @@ function groupChatSyncSnapshot(all = $groupChats.get()) {
         ...(entry?.from?.source ? { source: String(entry.from.source).slice(0, 128) } : {})
       },
       text: String(entry?.text || '').slice(0, GROUP_CHAT_SYNC_TEXT_CHARS),
-      at: Number(entry?.at || 0)
+      at: Number(entry?.at || 0),
+      ...(entry?.thread ? { thread: String(entry.thread).slice(0, 128) } : {})
     }))
     const compact = {
       log,
@@ -227,10 +255,10 @@ function groupChatSyncSnapshot(all = $groupChats.get()) {
     }
 
     rooms[name] = compact
-    while (compact.log.length > 1 && JSON.stringify(envelope).length > GROUP_CHAT_SYNC_MAX_BYTES) {
+    while (compact.log.length > 1 && groupChatGatewayJsonSize(envelope) > GROUP_CHAT_SYNC_MAX_BYTES) {
       compact.log.shift()
     }
-    if (JSON.stringify(envelope).length > GROUP_CHAT_SYNC_MAX_BYTES) {
+    if (groupChatGatewayJsonSize(envelope) > GROUP_CHAT_SYNC_MAX_BYTES) {
       delete rooms[name]
     }
   }
@@ -240,17 +268,23 @@ function groupChatSyncSnapshot(all = $groupChats.get()) {
 
 /** Debounced best-effort server mirror. Older gateways reject ui_meta and
  *  Desktop's local room remains authoritative, preserving compatibility. */
-function scheduleGroupChatServerSync(all = $groupChats.get()) {
+function scheduleGroupChatServerSync(all = $groupChats.get(), { allowEmpty = false } = {}) {
   // Browser shells provide timers; source-level VM tests and older embedded
   // hosts may not. Room persistence must never break the surrounding gateway
   // lifecycle when the optional mirror cannot be scheduled.
   if (typeof setTimeout !== 'function') {
     return
   }
+  const snapshot = groupChatSyncSnapshot(all)
+  // A newly installed Desktop has no local room cache. Publishing that empty
+  // state on hydrate/reconnect would erase a valid mirror produced elsewhere.
+  // Only an explicit final-room disband is allowed to clear the projection.
+  if (Object.keys(snapshot.rooms).length === 0 && !allowEmpty) {
+    return
+  }
   if (groupChatSyncTimer !== null) {
     clearTimeout(groupChatSyncTimer)
   }
-  const snapshot = groupChatSyncSnapshot(all)
   groupChatSyncTimer = setTimeout(() => {
     groupChatSyncTimer = null
     try {
@@ -3655,7 +3689,7 @@ async function disbandGroupChat(group, members) {
   } catch {
     /* storage unavailable — the atom reset above still empties the room */
   }
-  scheduleGroupChatServerSync($groupChats.get())
+  scheduleGroupChatServerSync($groupChats.get(), { allowEmpty: true })
 
   // Remove this membership last. saveBotMeta never throws (local storage +
   // best-effort profiles.configure per member), so a flaky gateway can't
