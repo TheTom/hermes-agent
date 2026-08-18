@@ -268,7 +268,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             ListTile(
               leading: const Icon(Icons.favorite_outline),
               title: const Text('Apple Health'),
-              subtitle: const Text('Private sync and Health Coach access'),
+              subtitle: const Text('Private sync and bot capability access'),
               trailing: const Icon(Icons.chevron_right),
               onTap: () => _showAppleHealthSettings(profile.id),
             ),
@@ -455,7 +455,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                     ),
                     const SizedBox(height: 8),
                     const Text(
-                      'Hermes Go reads HealthKit only after your permission and sends samples to this authenticated Hermes gateway. Health Coach bots can query bounded summaries; health data is never added to every chat prompt.',
+                      'Hermes Go reads HealthKit only after your permission and sends samples to this authenticated Hermes gateway. Bots with the Apple Health capability can query bounded summaries; health data is never added to every chat prompt.',
                     ),
                     const SizedBox(height: 12),
                     SwitchListTile.adaptive(

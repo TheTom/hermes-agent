@@ -1,11 +1,9 @@
-import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'package:hermes_mobile/core/models/hermes_models.dart';
-import 'package:hermes_mobile/core/health/apple_health_sync.dart';
 import 'package:hermes_mobile/core/providers.dart';
 import 'package:hermes_mobile/features/bots/bot_advanced_editor.dart';
 import 'package:hermes_mobile/features/bots/bot_avatar_picker.dart';
@@ -50,7 +48,6 @@ class _CreateBotSheetState extends ConsumerState<_CreateBotSheet> {
   Uint8List? _avatarBytes;
   var _useImage = false;
   var _busy = false;
-  var _healthCoach = false;
   final _advanced = BotAdvancedController.create();
   String? _error;
 
@@ -78,22 +75,6 @@ class _CreateBotSheetState extends ConsumerState<_CreateBotSheet> {
       _error = null;
     });
     try {
-      if (Platform.isIOS && _healthCoach) {
-        final profile = ref.read(connectionProfileProvider).value;
-        final dashboard = ref.read(dashboardClientProvider);
-        if (profile == null || dashboard == null) {
-          throw StateError('Connect to your Hermes gateway first');
-        }
-        final health = AppleHealthSync(
-          gatewayId: profile.id,
-          dashboard: dashboard,
-        );
-        final granted = await health.requestReadAuthorization();
-        if (!granted) {
-          throw StateError('Apple Health read access was not granted');
-        }
-        await health.sync(initial: true);
-      }
       final bot = await sync.createBot(
         name: _slug,
         title: _title.text,
@@ -101,7 +82,6 @@ class _CreateBotSheetState extends ConsumerState<_CreateBotSheet> {
         shape: _shape,
         color: _color,
         avatarBytes: _useImage ? _avatarBytes : null,
-        healthCoach: _healthCoach,
         cloneFrom: _advanced.cloneFrom,
         shareAuth: _advanced.shareAuth,
         noSkills: _advanced.noSkills,
@@ -188,19 +168,6 @@ class _CreateBotSheetState extends ConsumerState<_CreateBotSheet> {
                     FocusManager.instance.primaryFocus?.unfocus(),
               ),
               const SizedBox(height: 20),
-              if (Platform.isIOS)
-                SwitchListTile.adaptive(
-                  contentPadding: EdgeInsets.zero,
-                  value: _healthCoach,
-                  onChanged: _busy
-                      ? null
-                      : (value) => setState(() => _healthCoach = value),
-                  secondary: const Icon(Icons.favorite_outline),
-                  title: const Text('Health Coach'),
-                  subtitle: const Text(
-                    'Read your selected Apple Health data from this bot. Data syncs privately to your Hermes gateway.',
-                  ),
-                ),
               BotAdvancedEditor(
                 controller: _advanced,
                 profile: _slug,

@@ -21,34 +21,20 @@ import 'package:hermes_mobile/core/sync/single_flight.dart';
 import 'package:hermes_mobile/core/sync/watch_store.dart';
 import 'package:hermes_mobile/l10n/l10n.dart';
 
-const _healthCoachSoulMarker = '<!-- hermes-go-health-coach -->';
-const _healthRoutingVersion = 1;
+const _legacyHealthCoachSoulMarker = '<!-- hermes-go-health-coach -->';
 
-String _withHealthRouting(String soul, {required bool healthCoach}) {
+String _withoutLegacyHealthRouting(String soul) {
   final lines = soul.split('\n');
-  final marker = lines.indexOf(_healthCoachSoulMarker);
+  final marker = lines.indexOf(_legacyHealthCoachSoulMarker);
   if (marker >= 0) {
     final removeCount = (lines.length - marker).clamp(0, 3);
     lines.removeRange(marker, marker + removeCount);
     if (marker > 0 && lines[marker - 1].isEmpty) lines.removeAt(marker - 1);
   }
-  if (healthCoach) {
-    lines.addAll([
-      '',
-      _healthCoachSoulMarker,
-      'For Apple Health questions, use `apple_health_status` and `apple_health_summary` as the authoritative source.',
-      'Do not read legacy Shortcut export files unless the user explicitly asks about that old pipeline.',
-    ]);
-  }
   return lines.join('\n').trim();
 }
 
-String _generatedBotSoul(
-  String profile,
-  String title,
-  String description, {
-  bool healthCoach = false,
-}) {
+String _generatedBotSoul(String profile, String title, String description) {
   final displayName = title.isEmpty ? profile : title;
   return [
     '# $displayName',
@@ -58,12 +44,6 @@ String _generatedBotSoul(
     '',
     'You are $displayName, a persistent named agent (profile `$profile`) on this machine.',
     'You keep your own memory, skills, and conversation history across sessions.',
-    if (healthCoach) ...[
-      '',
-      _healthCoachSoulMarker,
-      'For Apple Health questions, use `apple_health_status` and `apple_health_summary` as the authoritative source.',
-      'Do not read legacy Shortcut export files unless the user explicitly asks about that old pipeline.',
-    ],
   ].join('\n');
 }
 
@@ -74,7 +54,6 @@ String? _updateGeneratedBotSoul(
   required String profile,
   required String title,
   required String description,
-  required bool healthCoach,
 }) {
   final marker = 'persistent named agent (profile `$profile`)';
   if (!soul.contains(marker)) return null;
@@ -106,21 +85,13 @@ String? _updateGeneratedBotSoul(
     lines[identity] =
         'You are $displayName, a persistent named agent (profile `$profile`) on this machine.';
   }
-  final healthMarker = lines.indexOf(_healthCoachSoulMarker);
+  final healthMarker = lines.indexOf(_legacyHealthCoachSoulMarker);
   if (healthMarker >= 0) {
     final removeCount = (lines.length - healthMarker).clamp(0, 3);
     lines.removeRange(healthMarker, healthMarker + removeCount);
     if (healthMarker > 0 && lines[healthMarker - 1].isEmpty) {
       lines.removeAt(healthMarker - 1);
     }
-  }
-  if (healthCoach) {
-    lines.addAll([
-      '',
-      _healthCoachSoulMarker,
-      'For Apple Health questions, use `apple_health_status` and `apple_health_summary` as the authoritative source.',
-      'Do not read legacy Shortcut export files unless the user explicitly asks about that old pipeline.',
-    ]);
   }
   return lines.join('\n');
 }
@@ -1077,43 +1048,10 @@ class SessionSyncRepository {
   /// reuse its pinned chat when present, recover to its newest session when a
   /// pin is stale, or create a Bot Chat when none exists.
   Future<({HermesSession session, bool created})> openBotChat(
-    HermesBotProfile bot, {
-    bool routingChecked = false,
-  }) async {
+    HermesBotProfile bot,
+  ) async {
     final profile = bot.name.trim();
     if (profile.isEmpty) throw StateError('Bot profile name is missing');
-    final rawUi = bot.raw['ui_meta'];
-    final rawMeta = rawUi is Map ? rawUi['hermes-bots'] : null;
-    final healthCoach = rawMeta is Map && rawMeta['healthCoach'] == true;
-    if (healthCoach && !routingChecked) {
-      final described = await gatewayRequest('profiles.describe', {
-        'name': profile,
-      });
-      final soul = '${described['soul'] ?? ''}';
-      final toolsets = described['toolsets'];
-      final nativeToolsEnabled =
-          toolsets is List &&
-          toolsets.whereType<Map>().any(
-            (toolset) =>
-                toolset['name'] == 'apple_health' && toolset['enabled'] == true,
-          );
-      final nativeRoutingInstalled = soul.contains(_healthCoachSoulMarker);
-      if (!nativeRoutingInstalled || !nativeToolsEnabled) {
-        // One-time migration for Health Coach bots created before the native
-        // HealthKit bridge had explicit routing. It refreshes the profile soul,
-        // enables the plugin toolset, and pins a fresh schema-bearing session.
-        final migrated = await updateBot(
-          bot: bot,
-          title: bot.displayName,
-          description: bot.description ?? '',
-          shape: bot.shape ?? 'circle',
-          color: bot.color ?? '#f97316',
-          usePhoto: bot.usesImageAvatar,
-          healthCoach: true,
-        );
-        return openBotChat(migrated, routingChecked: true);
-      }
-    }
     final listed = await gatewayRequest('session.list', {
       'profile': profile,
       'limit': 100,
@@ -1270,7 +1208,6 @@ class SessionSyncRepository {
     required String shape,
     required String color,
     Uint8List? avatarBytes,
-    bool healthCoach = false,
     String? cloneFrom = 'default',
     bool shareAuth = true,
     bool noSkills = false,
@@ -1289,13 +1226,8 @@ class SessionSyncRepository {
       cleanDescription,
     ].where((part) => part.isNotEmpty).join(' — ');
     final soul = customSoul.trim().isEmpty
-        ? _generatedBotSoul(
-            slug,
-            cleanTitle,
-            cleanDescription,
-            healthCoach: healthCoach,
-          )
-        : _withHealthRouting(customSoul.trim(), healthCoach: healthCoach);
+        ? _generatedBotSoul(slug, cleanTitle, cleanDescription)
+        : customSoul.trim();
     final cleanModel = model.trim();
     final cleanProvider = provider.trim();
 
@@ -1333,39 +1265,19 @@ class SessionSyncRepository {
       'title': cleanTitle,
       'created': createdAt,
       'custom': true,
-      'healthCoach': healthCoach,
-      if (healthCoach) 'healthRoutingVersion': _healthRoutingVersion,
     };
-    final described = await gatewayRequest('profiles.describe', {'name': slug});
-    final rawToolsets = described['toolsets'];
-    final resolvedToolsets = enabledToolsets != null
-        ? [...enabledToolsets]
-        : rawToolsets is List
-        ? rawToolsets
-              .whereType<Map>()
-              .where((toolset) => toolset['enabled'] == true)
-              .map((toolset) => '${toolset['name'] ?? ''}')
-              .where(
-                (toolset) => toolset.isNotEmpty && toolset != 'apple_health',
-              )
-              .toList()
-        : <String>[];
-    resolvedToolsets.removeWhere((toolset) => toolset == 'apple_health');
-    if (healthCoach) resolvedToolsets.add('apple_health');
     final configured = await gatewayRequest('profiles.configure', {
       'name': slug,
       'ui_meta': {'hermes-bots': metadata},
       'disabled_skills': ?disabledSkills,
-      if (enabledToolsets != null || healthCoach)
-        'enabled_toolsets': resolvedToolsets,
+      'enabled_toolsets': ?enabledToolsets,
       'enabled_mcp_servers': ?enabledMcpServers,
     });
     final applied = configured['applied'];
     if (applied is Map &&
         (applied['ui_meta'] != true ||
             (disabledSkills != null && applied['skills'] != true) ||
-            ((enabledToolsets != null || healthCoach) &&
-                applied['toolsets'] != true) ||
+            (enabledToolsets != null && applied['toolsets'] != true) ||
             (enabledMcpServers != null && applied['mcp_servers'] != true))) {
       throw StateError(
         'The profile was created, but some advanced settings could not be saved',
@@ -1397,7 +1309,6 @@ class SessionSyncRepository {
     required bool usePhoto,
     Uint8List? avatarBytes,
     bool avatarChanged = false,
-    bool healthCoach = false,
     String? soul,
     String model = '',
     String provider = '',
@@ -1427,7 +1338,6 @@ class SessionSyncRepository {
 
     final rawUi = bot.raw['ui_meta'];
     final rawMeta = rawUi is Map ? rawUi['hermes-bots'] : null;
-    final wasHealthCoach = rawMeta is Map && rawMeta['healthCoach'] == true;
     final metadata = rawMeta is Map
         ? rawMeta.map((key, value) => MapEntry('$key', value))
         : <String, dynamic>{};
@@ -1436,13 +1346,10 @@ class SessionSyncRepository {
       ..['color'] = color
       ..['imageKind'] = usePhoto ? 'photo' : 'shape'
       ..['title'] = title.trim()
-      ..['custom'] = true
-      ..['healthCoach'] = healthCoach;
-    if (healthCoach) {
-      metadata['healthRoutingVersion'] = _healthRoutingVersion;
-    } else {
-      metadata.remove('healthRoutingVersion');
-    }
+      ..['custom'] = true;
+    metadata
+      ..remove('healthCoach')
+      ..remove('healthRoutingVersion');
 
     final described = await gatewayRequest('profiles.describe', {
       'name': profile,
@@ -1454,26 +1361,9 @@ class SessionSyncRepository {
             profile: profile,
             title: title.trim(),
             description: description.trim(),
-            healthCoach: healthCoach,
           )
-        : _withHealthRouting(soul.trim(), healthCoach: healthCoach);
+        : _withoutLegacyHealthRouting(soul.trim());
     final soulChanged = updatedSoul != null && updatedSoul != existingSoul;
-    final rawToolsets = described['toolsets'];
-    final resolvedToolsets = enabledToolsets != null
-        ? [...enabledToolsets]
-        : rawToolsets is List
-        ? rawToolsets
-              .whereType<Map>()
-              .where((toolset) => toolset['enabled'] == true)
-              .map((toolset) => '${toolset['name'] ?? ''}')
-              .where(
-                (toolset) => toolset.isNotEmpty && toolset != 'apple_health',
-              )
-              .toList()
-        : <String>[];
-    resolvedToolsets.removeWhere((toolset) => toolset == 'apple_health');
-    if (healthCoach) resolvedToolsets.add('apple_health');
-
     final cleanDescription = description.trim();
     final cleanModel = model.trim();
     final cleanProvider = provider.trim();
@@ -1487,8 +1377,7 @@ class SessionSyncRepository {
       },
       'ui_meta': {'hermes-bots': metadata},
       'disabled_skills': ?disabledSkills,
-      if (enabledToolsets != null || wasHealthCoach || healthCoach)
-        'enabled_toolsets': resolvedToolsets,
+      'enabled_toolsets': ?enabledToolsets,
       'enabled_mcp_servers': ?enabledMcpServers,
     });
     final applied = configured['applied'];
@@ -1498,16 +1387,14 @@ class SessionSyncRepository {
             (soulChanged && applied['soul'] != true) ||
             (cleanModel.isNotEmpty && applied['model'] != true) ||
             (disabledSkills != null && applied['skills'] != true) ||
-            ((enabledToolsets != null || wasHealthCoach || healthCoach) &&
-                applied['toolsets'] != true) ||
+            (enabledToolsets != null && applied['toolsets'] != true) ||
             (enabledMcpServers != null && applied['mcp_servers'] != true))) {
       throw StateError('Server could not save all bot profile changes');
     }
 
     // Tool schemas and system prompts are fixed for a session to preserve
     // prompt caching. Pin a fresh Bot Chat after either changes.
-    if (wasHealthCoach != healthCoach ||
-        soulChanged ||
+    if (soulChanged ||
         cleanModel.isNotEmpty ||
         disabledSkills != null ||
         enabledToolsets != null ||
@@ -1527,7 +1414,7 @@ class SessionSyncRepository {
       final repinnedApplied = repinned['applied'];
       if (repinnedApplied is Map && repinnedApplied['ui_meta'] != true) {
         throw StateError(
-          'Health access changed, but the fresh bot chat could not be pinned',
+          'Bot capabilities changed, but the fresh chat could not be pinned',
         );
       }
     }

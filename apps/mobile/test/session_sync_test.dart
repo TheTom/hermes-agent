@@ -421,7 +421,7 @@ void main() {
   });
 
   test(
-    'Health Coach creation routes health questions to native tools',
+    'Apple Health is configured through the standard capability list',
     () async {
       final realtime = _BotRealtime(repo);
       repo.bindRealtime(realtime);
@@ -433,25 +433,25 @@ void main() {
         description: 'Daily health trends',
         shape: 'circle',
         color: '#f97316',
-        healthCoach: true,
+        enabledToolsets: const ['web', 'apple_health'],
       );
 
       final create = realtime.calls.singleWhere(
         (call) => call.method == 'profiles.create',
       );
-      expect(create.params['soul'], contains('`apple_health_summary`'));
-      expect(create.params['soul'], contains('Do not read legacy Shortcut'));
+      expect(create.params['soul'], isNot(contains('hermes-go-health-coach')));
       final configure = realtime.calls.singleWhere(
         (call) => call.method == 'profiles.configure',
       );
-      expect(configure.params['enabled_toolsets'], contains('apple_health'));
+      expect(configure.params['enabled_toolsets'], ['web', 'apple_health']);
       final metadata =
           (configure.params['ui_meta'] as Map)['hermes-bots'] as Map;
-      expect(metadata['healthRoutingVersion'], 1);
+      expect(metadata, isNot(contains('healthCoach')));
+      expect(metadata, isNot(contains('healthRoutingVersion')));
     },
   );
 
-  test('opening an older Health Coach migrates its routing once', () async {
+  test('opening a legacy Health Coach does not rewrite its profile', () async {
     final realtime = _BotRealtime(
       repo,
       soul:
@@ -477,21 +477,15 @@ void main() {
     final target = await repo.openBotChat(bot);
 
     expect(target.created, isFalse);
-    expect(target.session.id, 'fresh-health-chat');
+    expect(target.session.id, 'old-chat');
     expect(
       realtime.calls.where((call) => call.method == 'session.create'),
-      hasLength(1),
+      isEmpty,
     );
-    final soulSave = realtime.calls.firstWhere(
-      (call) => call.params['soul'] != null,
+    expect(
+      realtime.calls.where((call) => call.params['soul'] != null),
+      isEmpty,
     );
-    expect(soulSave.params['soul'], contains('`apple_health_status`'));
-    final repin = realtime.calls.lastWhere(
-      (call) => call.method == 'profiles.configure',
-    );
-    final metadata = (repin.params['ui_meta'] as Map)['hermes-bots'] as Map;
-    expect(metadata['healthRoutingVersion'], 1);
-    expect(metadata['chat'], 'fresh-health-chat');
   });
 
   test(
@@ -549,7 +543,7 @@ void main() {
   );
 
   test(
-    'changing Health Coach access pins a fresh tool-schema session',
+    'changing standard capabilities pins a fresh tool-schema session',
     () async {
       final realtime = _BotRealtime(repo);
       repo.bindRealtime(realtime);
@@ -574,7 +568,7 @@ void main() {
         shape: 'circle',
         color: '#f97316',
         usePhoto: false,
-        healthCoach: true,
+        enabledToolsets: const ['web', 'apple_health'],
       );
 
       final create = realtime.calls.singleWhere(
@@ -587,7 +581,14 @@ void main() {
       );
       final metadata = (repin.params['ui_meta'] as Map)['hermes-bots'] as Map;
       expect(metadata['chat'], 'fresh-health-chat');
-      expect(metadata['healthCoach'], isTrue);
+      expect(metadata, isNot(contains('healthCoach')));
+      final capabilitySave = realtime.calls.firstWhere(
+        (call) => call.params['enabled_toolsets'] != null,
+      );
+      expect(capabilitySave.params['enabled_toolsets'], [
+        'web',
+        'apple_health',
+      ]);
     },
   );
 
@@ -672,7 +673,6 @@ void main() {
         shape: 'circle',
         color: '#f97316',
         usePhoto: false,
-        healthCoach: true,
       );
 
       final save = realtime.calls.firstWhere(
