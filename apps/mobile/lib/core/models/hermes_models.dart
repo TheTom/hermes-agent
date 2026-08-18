@@ -829,12 +829,19 @@ class HermesBotProfile {
   final bool pinned;
   final Map<String, dynamic> raw;
 
-  /// Only profiles explicitly enrolled by the Bot Mode plugin are bots.
-  /// The gateway also returns its built-in/default Hermes profile, whose
-  /// latest session is an ordinary chat and must never appear in this roster.
+  /// Profiles explicitly enrolled by Bot Mode carry its UI metadata. Older
+  /// Desktop/gateway builds still treated every named profile as a bot but
+  /// did not persist that metadata, so named legacy profiles remain eligible.
+  /// The sole exception is an unmanaged `default` profile: its latest session
+  /// is normally an ordinary chat and must not be promoted into the roster.
   bool get isBotModeManaged {
     final ui = raw['ui_meta'];
     return ui is Map && ui['hermes-bots'] is Map;
+  }
+
+  bool get belongsInBotRoster {
+    if (isBotModeManaged) return true;
+    return !isDefault && name.trim().toLowerCase() != 'default';
   }
 
   String get displayName {
@@ -942,7 +949,7 @@ class HermesBotRoster {
               )
               .where(
                 (profile) =>
-                    profile.name.isNotEmpty && profile.isBotModeManaged,
+                    profile.name.isNotEmpty && profile.belongsInBotRoster,
               )
               .toList(growable: false)
         : const <HermesBotProfile>[];
@@ -956,6 +963,110 @@ class HermesBotRoster {
       profiles: available ? profiles : const [],
     );
   }
+}
+
+/// Display copy of one Desktop Bot Mode group-chat message.
+///
+/// Desktop mirrors a bounded room log through the default profile's
+/// `ui_meta['hermes-bots-groups']` block. The gateway remains the source of
+/// truth; mobile never tries to reconstruct room order from member sessions.
+class HermesBotGroupMessage {
+  const HermesBotGroupMessage({
+    required this.kind,
+    required this.name,
+    required this.text,
+    this.source,
+    this.at,
+  });
+
+  final String kind;
+  final String name;
+  final String text;
+  final String? source;
+  final int? at;
+
+  bool get isUser => kind == 'user';
+
+  factory HermesBotGroupMessage.fromJson(Map<String, dynamic> json) {
+    final rawFrom = json['from'];
+    final from = rawFrom is Map
+        ? rawFrom.map((key, value) => MapEntry('$key', value))
+        : const <String, dynamic>{};
+    final rawAt = json['at'];
+    final at = rawAt is num ? rawAt.toInt() : int.tryParse('${rawAt ?? ''}');
+    final kind = '${from['kind'] ?? 'user'}'.trim().toLowerCase();
+    return HermesBotGroupMessage(
+      kind: kind == 'member' ? 'member' : 'user',
+      name: '${from['name'] ?? (kind == 'member' ? 'Bot' : 'You')}'.trim(),
+      source: _asString(from['source'])?.trim(),
+      text: '${json['text'] ?? ''}'.trim(),
+      at: at,
+    );
+  }
+}
+
+class HermesBotGroupRoom {
+  const HermesBotGroupRoom({
+    required this.name,
+    this.messages = const [],
+    this.members = const [],
+  });
+
+  final String name;
+  final List<HermesBotGroupMessage> messages;
+  final List<String> members;
+
+  factory HermesBotGroupRoom.fromJson(String name, Map<String, dynamic> json) {
+    final rawLog = json['log'];
+    final messages = rawLog is List
+        ? rawLog
+              .whereType<Map>()
+              .map(
+                (entry) => HermesBotGroupMessage.fromJson(
+                  entry.map((key, value) => MapEntry('$key', value)),
+                ),
+              )
+              .where((message) => message.text.isNotEmpty)
+              .toList(growable: false)
+        : const <HermesBotGroupMessage>[];
+    final rawMembers = json['members'];
+    final members = rawMembers is List
+        ? rawMembers
+              .whereType<Map>()
+              .map((entry) => '${entry['name'] ?? ''}'.trim())
+              .where((member) => member.isNotEmpty)
+              .toList(growable: false)
+        : const <String>[];
+    return HermesBotGroupRoom(name: name, messages: messages, members: members);
+  }
+}
+
+Map<String, HermesBotGroupRoom> parseHermesBotGroupRooms(
+  Map<String, dynamic> profilePayload,
+) {
+  final rawProfiles = profilePayload['profiles'];
+  if (rawProfiles is! List) return const {};
+  for (final rawProfile in rawProfiles.whereType<Map>()) {
+    final name = '${rawProfile['name'] ?? ''}'.trim().toLowerCase();
+    if (name != 'default' && rawProfile['is_default'] != true) continue;
+    final rawUi = rawProfile['ui_meta'];
+    if (rawUi is! Map) continue;
+    final rawEnvelope = rawUi['hermes-bots-groups'];
+    if (rawEnvelope is! Map) continue;
+    final rawRooms = rawEnvelope['rooms'];
+    if (rawRooms is! Map) return const {};
+    final rooms = <String, HermesBotGroupRoom>{};
+    for (final entry in rawRooms.entries) {
+      final roomName = '${entry.key}'.trim();
+      if (roomName.isEmpty || entry.value is! Map) continue;
+      rooms[roomName] = HermesBotGroupRoom.fromJson(
+        roomName,
+        (entry.value as Map).map((key, value) => MapEntry('$key', value)),
+      );
+    }
+    return Map.unmodifiable(rooms);
+  }
+  return const {};
 }
 
 /// Converts the ISO/unix timestamps used by gateway session rows to millis.

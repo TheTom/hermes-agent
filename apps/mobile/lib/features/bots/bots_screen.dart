@@ -8,6 +8,7 @@ import 'package:hermes_mobile/core/providers.dart';
 import 'package:hermes_mobile/features/bots/bot_avatar.dart';
 import 'package:hermes_mobile/features/bots/bot_cronjobs_sheet.dart';
 import 'package:hermes_mobile/features/bots/bot_group_sheet.dart';
+import 'package:hermes_mobile/features/bots/bot_group_chat_sheet.dart';
 import 'package:hermes_mobile/features/bots/bot_sessions_sheet.dart';
 import 'package:hermes_mobile/features/bots/create_bot_sheet.dart';
 import 'package:hermes_mobile/features/bots/edit_bot_sheet.dart';
@@ -124,7 +125,10 @@ class _BotsScreenState extends ConsumerState<BotsScreen> {
                             ),
                           ],
                         )
-                      : _BotRosterList(profiles: view.profiles),
+                      : _BotRosterList(
+                          profiles: view.profiles,
+                          groupRooms: view.groupRooms,
+                        ),
                 ),
               ),
             ],
@@ -175,9 +179,10 @@ List<BotRosterSection> botRosterSections(List<HermesBotProfile> bots) {
 }
 
 class _BotRosterList extends StatelessWidget {
-  const _BotRosterList({required this.profiles});
+  const _BotRosterList({required this.profiles, required this.groupRooms});
 
   final List<HermesBotProfile> profiles;
+  final Map<String, HermesBotGroupRoom> groupRooms;
 
   @override
   Widget build(BuildContext context) {
@@ -204,6 +209,23 @@ class _BotRosterList extends StatelessWidget {
                     color: theme.colorScheme.primary.withValues(alpha: 0.35),
                   ),
                 ),
+                if (section.bots.length > 1) ...[
+                  const SizedBox(width: 6),
+                  TextButton.icon(
+                    onPressed: () => showBotGroupChatSheet(
+                      context,
+                      group: section.group!,
+                      members: section.bots,
+                    ),
+                    icon: Icon(
+                      groupRooms[section.group]?.messages.isNotEmpty == true
+                          ? Icons.forum
+                          : Icons.forum_outlined,
+                      size: 16,
+                    ),
+                    label: const Text('Open chat'),
+                  ),
+                ],
               ],
             ),
           ),

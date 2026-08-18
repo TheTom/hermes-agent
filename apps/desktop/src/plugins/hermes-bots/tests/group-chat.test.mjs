@@ -16,6 +16,7 @@ function load(turnScript) {
     return slot
   }
   const calls = []
+  const requests = []
   const transcripts = new Map()
   const context = {
     atom,
@@ -29,6 +30,7 @@ function load(turnScript) {
     document: { getElementById: () => null, createElement: () => ({}), head: { appendChild: () => undefined } },
     host: {
       request: async (method, params) => {
+        requests.push({ method, params })
         if (method === 'session.create') {
           return { session_id: `rt-${params.profile}`, stored_session_id: `sid-${params.profile}`, message_count: 0, messages: [] }
         }
@@ -62,7 +64,7 @@ function load(turnScript) {
     .replace(/^import .* from 'react\/jsx-runtime'\r?\n/m, '')
     .replace('export default {', 'globalThis.plugin = {')
     .concat(
-      '\nglobalThis.__gc = { sendToGroupChat, runGroupChatRounds, resolveGroupResponders, parseGroupChatMentions, rotateGroupSpeakers, isGroupPassText, formatGroupChatLine, buildGroupChatTurnPrompt, trimGroupChatLog, disbandGroupChat, $groupChats, $groupNeedsYou, $groupChatWorkspace, $botMeta, GROUP_CHAT_MAX_ROUNDS, GROUP_CHAT_MAX_MESSAGES };\n'
+      '\nglobalThis.__gc = { sendToGroupChat, runGroupChatRounds, resolveGroupResponders, parseGroupChatMentions, rotateGroupSpeakers, isGroupPassText, formatGroupChatLine, buildGroupChatTurnPrompt, trimGroupChatLog, groupChatSyncSnapshot, disbandGroupChat, $groupChats, $groupNeedsYou, $groupChatWorkspace, $botMeta, GROUP_CHAT_MAX_ROUNDS, GROUP_CHAT_MAX_MESSAGES };\n'
     )
   vm.runInNewContext(source, context, { filename: 'plugin.js' })
   const storageWrites = new Map()
@@ -70,7 +72,7 @@ function load(turnScript) {
     storage: { get: () => null, set: (key, value) => storageWrites.set(key, value) },
     register: () => undefined
   })
-  return { ...context.__gc, calls, storageWrites }
+  return { ...context.__gc, calls, requests, storageWrites }
 }
 
 const MEMBERS = [{ name: 'research', title: '' }, { name: 'builder', title: '' }, { name: 'ops', title: 'The Ops' }]
@@ -239,6 +241,41 @@ test('log trimming keeps watermarks consistent', () => {
   assert.equal(trimmed.length, 96)
   assert.equal(watermarks.research, 150 - 104)
   assert.equal(watermarks.builder, 0)
+})
+
+test('group room messages mirror through bounded gateway profile metadata', async () => {
+  const gc = load(() => '(pass)')
+  gc.sendToGroupChat('Research', [{ name: 'research', title: '' }], 'What changed?')
+  for (let i = 0; i < 200 && (gc.$groupChats.get().Research || {}).running; i++) {
+    await new Promise(resolve => setImmediate(resolve))
+  }
+
+  const configure = gc.requests.filter(call => call.method === 'profiles.configure').at(-1)
+  assert.ok(configure, 'room updates are mirrored to the gateway')
+  assert.equal(configure.params.name, 'default')
+  const envelope = configure.params.ui_meta['hermes-bots-groups']
+  assert.equal(envelope.version, 1)
+  assert.equal(envelope.rooms.Research.log[0].text, 'What changed?')
+  assert.ok(JSON.stringify(envelope).length <= 60000)
+})
+
+test('group gateway mirror is size bounded and favors recent messages', () => {
+  const gc = load(() => '(pass)')
+  const long = 'x'.repeat(5000)
+  const snapshot = gc.groupChatSyncSnapshot({
+    Large: {
+      log: Array.from({ length: 100 }, (_, index) => ({
+        from: { kind: index % 2 ? 'member' : 'user', name: index % 2 ? 'research' : 'You' },
+        text: `${index}:${long}`,
+        at: index
+      }))
+    }
+  })
+
+  assert.ok(JSON.stringify(snapshot).length <= 60000)
+  assert.ok(snapshot.rooms.Large.log.length <= 16)
+  assert.match(snapshot.rooms.Large.log.at(-1).text, /^99:/)
+  assert.ok(snapshot.rooms.Large.log.at(-1).text.length <= 1200)
 })
 
 test('source contract: workspace + header affordance + prompt rules are wired', () => {

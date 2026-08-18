@@ -152,6 +152,86 @@ void main() {
     expect(roster.profiles, isEmpty);
   });
 
+  test('legacy named profiles remain visible without bot UI metadata', () {
+    final profiles = <Map<String, dynamic>>[
+      for (var index = 1; index <= 9; index++)
+        {
+          'name': 'probe-$index',
+          if (index <= 6)
+            'ui_meta': {
+              'hermes-bots': {'title': 'Probe $index'},
+            },
+        },
+      {
+        'name': 'default',
+        'is_default': true,
+        'last_session': {'id': 'ordinary-chat'},
+      },
+    ];
+
+    final roster = HermesBotRoster.fromServer({
+      'bot_mode_protocol': true,
+      'profiles': profiles,
+    });
+
+    expect(roster.profiles, hasLength(9));
+    expect(
+      roster.profiles.map((profile) => profile.name),
+      containsAll(['probe-7', 'probe-8', 'probe-9']),
+    );
+    expect(
+      roster.profiles.any((profile) => profile.name == 'default'),
+      isFalse,
+    );
+  });
+
+  test('group chat messages parse from the gateway profile metadata', () {
+    final rooms = parseHermesBotGroupRooms({
+      'profiles': [
+        {
+          'name': 'default',
+          'is_default': true,
+          'ui_meta': {
+            'hermes-bots-groups': {
+              'version': 1,
+              'rooms': {
+                'Research': {
+                  'members': [
+                    {'name': 'reader'},
+                    {'name': 'writer'},
+                  ],
+                  'log': [
+                    {
+                      'from': {'kind': 'user', 'name': 'You'},
+                      'text': 'What changed?',
+                      'at': 1787072400000,
+                    },
+                    {
+                      'from': {
+                        'kind': 'member',
+                        'name': 'reader',
+                        'source': 'Mac mini',
+                      },
+                      'text': 'The gateway contract changed.',
+                      'at': 1787072401000,
+                    },
+                  ],
+                },
+              },
+            },
+          },
+        },
+      ],
+    });
+
+    expect(rooms.keys, ['Research']);
+    expect(rooms['Research']?.members, ['reader', 'writer']);
+    expect(rooms['Research']?.messages, hasLength(2));
+    expect(rooms['Research']?.messages.first.isUser, isTrue);
+    expect(rooms['Research']?.messages.last.name, 'reader');
+    expect(rooms['Research']?.messages.last.source, 'Mac mini');
+  });
+
   test(
     'bot roster stays hidden when neither capability nor plugin is exposed',
     () {

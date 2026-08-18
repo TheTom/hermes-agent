@@ -179,6 +179,78 @@ const $groupChatWorkspace = atom(null)
 /** Groups whose latest room activity mentions @user — the needs-you badge. */
 const $groupNeedsYou = atom({})
 
+const GROUP_CHAT_SYNC_META_KEY = 'hermes-bots-groups'
+const GROUP_CHAT_SYNC_MAX_BYTES = 60000
+const GROUP_CHAT_SYNC_MESSAGES = 16
+const GROUP_CHAT_SYNC_TEXT_CHARS = 1200
+let groupChatSyncTimer = null
+
+/** Compact, display-oriented copy of Desktop's room log for gateway clients.
+ *  The live orchestration state stays in plugin storage; this bounded mirror
+ *  rides the default profile's ui_meta so mobile can show the same messages.
+ *  Newest rooms/messages win when the profile metadata size cap is reached. */
+function groupChatSyncSnapshot(all = $groupChats.get()) {
+  const ranked = Object.entries(all || {})
+    .filter(([, room]) => room && Array.isArray(room.log))
+    .sort(([, left], [, right]) => {
+      const leftAt = Number(left.log[left.log.length - 1]?.at || 0)
+      const rightAt = Number(right.log[right.log.length - 1]?.at || 0)
+      return rightAt - leftAt
+    })
+  const rooms = {}
+  const envelope = { version: 1, updatedAt: Date.now(), rooms }
+
+  for (const [name, room] of ranked) {
+    const log = room.log.slice(-GROUP_CHAT_SYNC_MESSAGES).map(entry => ({
+      from: {
+        kind: entry?.from?.kind === 'member' ? 'member' : 'user',
+        name: String(entry?.from?.name || (entry?.from?.kind === 'member' ? 'Bot' : 'You')).slice(0, 128),
+        ...(entry?.from?.source ? { source: String(entry.from.source).slice(0, 128) } : {})
+      },
+      text: String(entry?.text || '').slice(0, GROUP_CHAT_SYNC_TEXT_CHARS),
+      at: Number(entry?.at || 0)
+    }))
+    const compact = {
+      log,
+      members: (Array.isArray(room.members) ? room.members : []).slice(0, GROUP_CHAT_MAX_MEMBERS).map(member => ({
+        name: String(member?.name || '').slice(0, 128),
+        ...(member?.handle ? { handle: String(member.handle).slice(0, 128) } : {}),
+        ...(member?.connectionLabel ? { connectionLabel: String(member.connectionLabel).slice(0, 128) } : {})
+      }))
+    }
+
+    rooms[name] = compact
+    while (compact.log.length > 1 && JSON.stringify(envelope).length > GROUP_CHAT_SYNC_MAX_BYTES) {
+      compact.log.shift()
+    }
+    if (JSON.stringify(envelope).length > GROUP_CHAT_SYNC_MAX_BYTES) {
+      delete rooms[name]
+    }
+  }
+
+  return envelope
+}
+
+/** Debounced best-effort server mirror. Older gateways reject ui_meta and
+ *  Desktop's local room remains authoritative, preserving compatibility. */
+function scheduleGroupChatServerSync(all = $groupChats.get()) {
+  if (groupChatSyncTimer !== null) {
+    clearTimeout(groupChatSyncTimer)
+  }
+  const snapshot = groupChatSyncSnapshot(all)
+  groupChatSyncTimer = setTimeout(() => {
+    groupChatSyncTimer = null
+    try {
+      Promise.resolve(host.request('profiles.configure', {
+        name: 'default',
+        ui_meta: { [GROUP_CHAT_SYNC_META_KEY]: snapshot }
+      })).catch(() => undefined)
+    } catch {
+      /* older/unavailable gateway — plugin storage remains authoritative */
+    }
+  }, 350)
+}
+
 function handleSessionsGatewayTransition() {
   $sessionsGatewayGeneration.set($sessionsGatewayGeneration.get() + 1)
   $botSelectedSessions.set({})
@@ -3060,6 +3132,7 @@ function updateGroupChat(group, mutate) {
   } catch {
     /* storage unavailable — room survives for this window only */
   }
+  scheduleGroupChatServerSync(all)
 
   return next
 }
@@ -3110,6 +3183,7 @@ async function disbandGroupChat(group, memberNames) {
   } catch {
     /* storage unavailable — the atom reset above still empties the room */
   }
+  scheduleGroupChatServerSync($groupChats.get())
 
   // Ungroup the members last. saveBotMeta never throws (local storage +
   // best-effort profiles.configure per member), so a flaky gateway can't
@@ -7653,6 +7727,7 @@ export default {
             }
 
             $groupChats.set({ ...rooms, ...$groupChats.get() })
+            scheduleGroupChatServerSync($groupChats.get())
           }
         })
         .catch(() => undefined)
