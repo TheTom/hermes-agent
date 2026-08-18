@@ -110,6 +110,7 @@ void main() {
                 'created': 1786800000000,
                 'pinned': true,
                 'group': 'Research',
+                'groups': ['Research', 'Editorial'],
               },
             },
           },
@@ -129,6 +130,16 @@ void main() {
       expect(researcher.lastSession?.preview, 'Latest findings');
       expect(researcher.pinned, isTrue);
       expect(researcher.group, 'Research');
+      expect(researcher.groups, ['Research', 'Editorial']);
+
+      final cleared = HermesBotProfile.fromJson({
+        'name': 'cleared',
+        'ui_meta': {
+          'hermes-bots': {'group': 'Legacy stale value', 'groups': <String>[]},
+        },
+      });
+      expect(cleared.group, isNull);
+      expect(cleared.groups, isEmpty);
     },
   );
 

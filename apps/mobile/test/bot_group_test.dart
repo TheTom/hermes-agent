@@ -4,11 +4,11 @@ import 'package:hermes_mobile/core/models/hermes_models.dart';
 import 'package:hermes_mobile/features/bots/bots_screen.dart';
 import 'package:hermes_mobile/core/providers.dart';
 
-HermesBotProfile _bot(String name, {String? group}) {
+HermesBotProfile _bot(String name, {String? group, List<String>? groups}) {
   return HermesBotProfile.fromJson({
     'name': name,
     'ui_meta': {
-      'hermes-bots': {'title': name, 'group': ?group},
+      'hermes-bots': {'title': name, 'group': ?group, 'groups': ?groups},
     },
   });
 }
@@ -32,6 +32,27 @@ void main() {
       'bot-8',
       'bot-9',
     ]);
+  });
+
+  test('one bot can be seated in multiple independent group chats', () {
+    final shared = _bot('shared', groups: ['First', 'Second']);
+    final firstOnly = _bot('first-only', groups: ['First']);
+    final secondOnly = _bot('second-only');
+    final secondRoom = HermesBotGroupRoom.fromJson('Second', {
+      'members': [
+        {'name': 'shared'},
+        {'name': 'second-only'},
+      ],
+    });
+
+    final groups = botGroupEntries(
+      [shared, firstOnly, secondOnly],
+      {'Second': secondRoom},
+    );
+
+    expect(groups.map((entry) => entry.group), ['First', 'Second']);
+    expect(groups[0].bots.map((bot) => bot.name), ['shared', 'first-only']);
+    expect(groups[1].bots.map((bot) => bot.name), ['shared', 'second-only']);
   });
 
   test('synced group rooms remain visible while membership is catching up', () {

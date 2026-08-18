@@ -28,6 +28,7 @@ class _BotGroupSheet extends ConsumerStatefulWidget {
 
 class _BotGroupSheetState extends ConsumerState<_BotGroupSheet> {
   final _name = TextEditingController();
+  late final Set<String> _current = {...widget.bot.groups};
   bool _busy = false;
   String? _error;
 
@@ -37,7 +38,7 @@ class _BotGroupSheetState extends ConsumerState<_BotGroupSheet> {
     super.dispose();
   }
 
-  Future<void> _assign(String? group) async {
+  Future<void> _toggle(String group, bool enabled) async {
     if (_busy) return;
     final sync = ref.read(sessionSyncProvider);
     if (sync == null) return;
@@ -47,9 +48,44 @@ class _BotGroupSheetState extends ConsumerState<_BotGroupSheet> {
       _error = null;
     });
     try {
-      await sync.updateBotGroup(widget.bot, group);
+      await sync.updateBotGroupMembership(
+        widget.bot,
+        group,
+        enabled,
+        currentGroups: _current,
+      );
+      if (enabled) {
+        _current.add(group);
+      } else {
+        _current.remove(group);
+      }
       await ref.read(botsProvider.notifier).refresh();
-      if (mounted) Navigator.of(context).pop();
+      if (mounted) {
+        _name.clear();
+        setState(() => _busy = false);
+      }
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _busy = false;
+        _error = '$error';
+      });
+    }
+  }
+
+  Future<void> _clearAll() async {
+    if (_busy) return;
+    final sync = ref.read(sessionSyncProvider);
+    if (sync == null) return;
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
+    try {
+      await sync.updateBotGroup(widget.bot, null);
+      _current.clear();
+      await ref.read(botsProvider.notifier).refresh();
+      if (mounted) setState(() => _busy = false);
     } catch (error) {
       if (!mounted) return;
       setState(() {
@@ -63,12 +99,12 @@ class _BotGroupSheetState extends ConsumerState<_BotGroupSheet> {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final bottom = MediaQuery.viewInsetsOf(context).bottom;
-    final profiles = ref.watch(botsProvider).value?.profiles ?? const [];
+    final roster = ref.watch(botsProvider).value;
+    final profiles = roster?.profiles ?? const [];
     final groups = {
-      for (final bot in profiles)
-        if (bot.group?.trim().isNotEmpty == true) bot.group!.trim(),
+      for (final bot in profiles) ...bot.groups,
+      ...?roster?.groupRooms.keys,
     }.toList()..sort((a, b) => a.toLowerCase().compareTo(b.toLowerCase()));
-    final current = widget.bot.group?.trim() ?? '';
 
     return AnimatedPadding(
       duration: const Duration(milliseconds: 180),
@@ -79,10 +115,20 @@ class _BotGroupSheetState extends ConsumerState<_BotGroupSheet> {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           mainAxisSize: MainAxisSize.min,
           children: [
-            Text('Move to group', style: theme.textTheme.headlineSmall),
+            Row(
+              children: [
+                Expanded(
+                  child: Text('Groups', style: theme.textTheme.headlineSmall),
+                ),
+                TextButton(
+                  onPressed: _busy ? null : () => Navigator.pop(context),
+                  child: const Text('Done'),
+                ),
+              ],
+            ),
             const SizedBox(height: 4),
             Text(
-              'Groups become labeled sections in the Bots roster and sync to every Hermes client.',
+              'A bot can join multiple group chats. Toggle each membership independently.',
               style: theme.textTheme.bodyMedium?.copyWith(
                 color: theme.colorScheme.onSurface.withValues(alpha: 0.62),
               ),
@@ -94,10 +140,12 @@ class _BotGroupSheetState extends ConsumerState<_BotGroupSheet> {
                 runSpacing: 8,
                 children: [
                   for (final group in groups)
-                    ChoiceChip(
+                    FilterChip(
                       label: Text(group),
-                      selected: group == current,
-                      onSelected: _busy ? null : (_) => _assign(group),
+                      selected: _current.contains(group),
+                      onSelected: _busy
+                          ? null
+                          : (selected) => _toggle(group, selected),
                     ),
                 ],
               ),
@@ -116,7 +164,8 @@ class _BotGroupSheetState extends ConsumerState<_BotGroupSheet> {
                       hintText: groups.isEmpty ? 'e.g. Research' : null,
                     ),
                     onSubmitted: (value) {
-                      if (value.trim().isNotEmpty) _assign(value);
+                      final group = value.trim();
+                      if (group.isNotEmpty) _toggle(group, true);
                     },
                     onTapOutside: (_) =>
                         FocusManager.instance.primaryFocus?.unfocus(),
@@ -128,20 +177,20 @@ class _BotGroupSheetState extends ConsumerState<_BotGroupSheet> {
                       ? null
                       : () {
                           final value = _name.text.trim();
-                          if (value.isNotEmpty) _assign(value);
+                          if (value.isNotEmpty) _toggle(value, true);
                         },
                   child: const Text('Create'),
                 ),
               ],
             ),
-            if (current.isNotEmpty) ...[
+            if (_current.isNotEmpty) ...[
               const SizedBox(height: 8),
               Align(
                 alignment: Alignment.centerLeft,
                 child: TextButton.icon(
-                  onPressed: _busy ? null : () => _assign(null),
+                  onPressed: _busy ? null : _clearAll,
                   icon: const Icon(Icons.folder_off_outlined),
-                  label: Text('Remove from “$current”'),
+                  label: const Text('Remove from all groups'),
                 ),
               ),
             ],

@@ -1482,8 +1482,10 @@ class SessionSyncRepository {
     final cleanGroup = group?.trim() ?? '';
     if (cleanGroup.isEmpty) {
       metadata.remove('group');
+      metadata['groups'] = <String>[];
     } else {
       metadata['group'] = cleanGroup;
+      metadata['groups'] = [cleanGroup];
     }
     final result = await gatewayRequest('profiles.configure', {
       'name': profile,
@@ -1492,6 +1494,62 @@ class SessionSyncRepository {
     final applied = result['applied'];
     if (applied is Map && applied['ui_meta'] != true) {
       throw StateError('Server could not save the bot group');
+    }
+  }
+
+  /// Toggle one group without replacing the bot's other memberships. The
+  /// scalar `group` remains a first-membership projection for older clients.
+  Future<void> updateBotGroupMembership(
+    HermesBotProfile bot,
+    String group,
+    bool enabled, {
+    Iterable<String>? currentGroups,
+  }) async {
+    final profile = bot.name.trim();
+    if (profile.isEmpty) throw StateError('Bot profile name is missing');
+    final cleanGroup = group.trim();
+    if (cleanGroup.isEmpty) throw StateError('Group name is missing');
+    // Refresh before applying the narrow membership delta. Starting from the
+    // tile's stale snapshot could otherwise overwrite a Desktop title, pin,
+    // canonical chat, or another group change made since the roster loaded.
+    var currentRaw = bot.raw;
+    try {
+      final listed = await gatewayRequest('profiles.list', {
+        'include_sessions': false,
+      });
+      final rawProfiles = listed['profiles'];
+      if (rawProfiles is List) {
+        for (final candidate in rawProfiles.whereType<Map>()) {
+          if ('${candidate['name'] ?? ''}'.trim() == profile) {
+            currentRaw = candidate.map((key, value) => MapEntry('$key', value));
+            break;
+          }
+        }
+      }
+    } catch (_) {
+      // Offline/older gateways retain the existing compatibility behavior.
+    }
+    final rawUi = currentRaw['ui_meta'];
+    final rawMeta = rawUi is Map ? rawUi['hermes-bots'] : null;
+    final metadata = rawMeta is Map
+        ? rawMeta.map((key, value) => MapEntry('$key', value))
+        : <String, dynamic>{};
+    final groups = [...(currentGroups ?? bot.groups)];
+    if (enabled && !groups.contains(cleanGroup)) groups.add(cleanGroup);
+    if (!enabled) groups.removeWhere((value) => value == cleanGroup);
+    metadata['groups'] = groups;
+    if (groups.isEmpty) {
+      metadata.remove('group');
+    } else {
+      metadata['group'] = groups.first;
+    }
+    final result = await gatewayRequest('profiles.configure', {
+      'name': profile,
+      'ui_meta': {'hermes-bots': metadata},
+    });
+    final applied = result['applied'];
+    if (applied is Map && applied['ui_meta'] != true) {
+      throw StateError('Server could not save the bot groups');
     }
   }
 

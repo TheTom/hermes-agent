@@ -167,9 +167,19 @@ List<BotGroupEntry> botGroupEntries(
 ) {
   final grouped = <String, List<HermesBotProfile>>{};
   for (final bot in bots) {
-    final group = bot.group?.trim() ?? '';
-    if (group.isNotEmpty) {
+    for (final group in bot.groups) {
       grouped.putIfAbsent(group, () => []).add(bot);
+    }
+  }
+  final profilesByName = {
+    for (final bot in bots) bot.name.trim().toLowerCase(): bot,
+  };
+  for (final entry in rooms.entries) {
+    final members = grouped.putIfAbsent(entry.key, () => []);
+    final seated = members.map((bot) => bot.name.toLowerCase()).toSet();
+    for (final name in entry.value.members) {
+      final bot = profilesByName[name.trim().toLowerCase()];
+      if (bot != null && seated.add(bot.name.toLowerCase())) members.add(bot);
     }
   }
   final names = <String>{...grouped.keys, ...rooms.keys}.toList()
@@ -473,9 +483,11 @@ class _BotTile extends ConsumerWidget {
                 child: ListTile(
                   leading: const Icon(Icons.folder_outlined),
                   title: Text(
-                    bot.group?.trim().isNotEmpty == true
-                        ? 'Group: ${bot.group}'
-                        : 'Move to group',
+                    bot.groups.isEmpty
+                        ? 'Add to groups'
+                        : (bot.groups.length == 1
+                              ? 'Group: ${bot.groups.first}'
+                              : 'Groups: ${bot.groups.length}'),
                   ),
                   contentPadding: EdgeInsets.zero,
                 ),

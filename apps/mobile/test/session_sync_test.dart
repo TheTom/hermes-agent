@@ -379,10 +379,36 @@ void main() {
       final metadata =
           (configure.params['ui_meta'] as Map)['hermes-bots'] as Map;
       expect(metadata['group'], 'Health and Fitness');
+      expect(metadata['groups'], ['Health and Fitness']);
       expect(metadata['title'], 'Senior cat wrangler');
       expect(metadata['shape'], 'hexagon');
     },
   );
+
+  test('bot group membership toggles preserve overlapping groups', () async {
+    final realtime = _BotRealtime(repo);
+    repo.bindRealtime(realtime);
+    addTearDown(realtime.dispose);
+    final bot = HermesBotProfile.fromJson({
+      'name': 'techno',
+      'ui_meta': {
+        'hermes-bots': {
+          'title': 'Senior cat wrangler',
+          'group': 'Cats',
+          'groups': ['Cats', 'Reviewers'],
+        },
+      },
+    });
+
+    await repo.updateBotGroupMembership(bot, 'Research', true);
+
+    final configure = realtime.calls.singleWhere(
+      (call) => call.method == 'profiles.configure',
+    );
+    final metadata = (configure.params['ui_meta'] as Map)['hermes-bots'] as Map;
+    expect(metadata['group'], 'Cats');
+    expect(metadata['groups'], ['Cats', 'Reviewers', 'Research']);
+  });
 
   test('bot pins update server metadata without losing fields', () async {
     final realtime = _BotRealtime(repo);

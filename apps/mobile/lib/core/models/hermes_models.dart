@@ -806,6 +806,7 @@ class HermesBotProfile {
     this.shape,
     this.imageKind,
     this.group,
+    this.groups = const [],
     this.chatSessionId,
     this.createdAt,
     this.pinned = false,
@@ -823,7 +824,11 @@ class HermesBotProfile {
   final String? color;
   final String? shape;
   final String? imageKind;
+
+  /// Canonical multi-group membership. [group] remains the legacy first-room
+  /// projection used by older Desktop and gateway builds.
   final String? group;
+  final List<String> groups;
   final String? chatSessionId;
   final int? createdAt;
   final bool pinned;
@@ -887,6 +892,19 @@ class HermesBotProfile {
       return result == null || result.isEmpty ? null : result;
     }
 
+    final rawGroups = meta['groups'];
+    final hasCanonicalGroups = rawGroups is List;
+    final groups = <String>[];
+    final seenGroups = <String>{};
+    if (rawGroups is List) {
+      for (final value in rawGroups) {
+        final group = text(value);
+        if (group != null && seenGroups.add(group)) groups.add(group);
+      }
+    }
+    final legacyGroup = text(meta['group']);
+    if (!hasCanonicalGroups && legacyGroup != null) groups.add(legacyGroup);
+
     return HermesBotProfile(
       name: text(json['name']) ?? '',
       description: text(json['description']),
@@ -899,7 +917,8 @@ class HermesBotProfile {
       color: text(meta['color']),
       shape: text(meta['shape']),
       imageKind: text(meta['imageKind']),
-      group: text(meta['group']),
+      group: groups.isEmpty ? null : groups.first,
+      groups: List.unmodifiable(groups),
       chatSessionId: text(meta['chat']),
       createdAt: integer(meta['created']),
       pinned: meta['pinned'] == true,
