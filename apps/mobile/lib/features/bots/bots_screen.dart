@@ -260,6 +260,18 @@ class _BotTile extends ConsumerWidget {
     final last = bot.lastSession;
     final relative = formatSessionRelative(last?.lastActive);
     final preview = last?.preview?.trim();
+    final workingSessionIds =
+        ref.watch(botWorkingSessionsProvider).value ?? const <String>{};
+    final sync = ref.watch(sessionSyncProvider);
+    final botSessionIds = <String>{
+      if (bot.chatSessionId?.trim().isNotEmpty == true)
+        bot.chatSessionId!.trim(),
+      if (last?.id.trim().isNotEmpty == true) last!.id.trim(),
+    };
+    final working = botSessionIds.any((sessionId) {
+      final family = sync?.sessionIdFamily(sessionId) ?? {sessionId};
+      return family.any(workingSessionIds.contains);
+    });
     final subtitle = preview?.isNotEmpty == true
         ? preview!
         : (bot.description?.trim().isNotEmpty == true
@@ -270,7 +282,7 @@ class _BotTile extends ConsumerWidget {
       contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
       onTap: () => _openBotChat(context, ref, bot),
       onLongPress: () => _editBot(context, ref, bot),
-      leading: BotAvatar(bot: bot),
+      leading: BotAvatar(bot: bot, working: working),
       title: Row(
         children: [
           Flexible(

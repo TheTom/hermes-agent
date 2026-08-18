@@ -12,10 +12,16 @@ import 'package:hermes_mobile/core/providers.dart';
 /// faces use the same shape/color metadata as Desktop and remain live so their
 /// eyes can glance and blink instead of displaying a baked initials circle.
 class BotAvatar extends ConsumerStatefulWidget {
-  const BotAvatar({super.key, required this.bot, this.size = 52});
+  const BotAvatar({
+    super.key,
+    required this.bot,
+    this.size = 52,
+    this.working = false,
+  });
 
   final HermesBotProfile bot;
   final double size;
+  final bool working;
 
   @override
   ConsumerState<BotAvatar> createState() => _BotAvatarState();
@@ -73,7 +79,7 @@ class _BotAvatarState extends ConsumerState<BotAvatar>
                           shape: widget.bot.shape ?? 'circle',
                           color: color,
                           phase: phase,
-                          working: _activeRecently(widget.bot),
+                          working: widget.working,
                         ),
                       )
                     : ClipRRect(
@@ -87,7 +93,7 @@ class _BotAvatarState extends ConsumerState<BotAvatar>
                               shape: widget.bot.shape ?? 'circle',
                               color: color,
                               phase: phase,
-                              working: _activeRecently(widget.bot),
+                              working: widget.working,
                             ),
                           ),
                         ),
@@ -99,12 +105,6 @@ class _BotAvatarState extends ConsumerState<BotAvatar>
       ),
     );
   }
-}
-
-bool _activeRecently(HermesBotProfile bot) {
-  final activity = parseServerTimeMillis(bot.lastSession?.lastActive);
-  return activity > 0 &&
-      DateTime.now().millisecondsSinceEpoch - activity < 90000;
 }
 
 Color? _parseBotColor(String? raw) {

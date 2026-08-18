@@ -1012,6 +1012,19 @@ final botAvatarProvider = FutureProvider.autoDispose.family<Uint8List?, String>(
   },
 );
 
+/// Real in-flight agent turns used by Bot Mode's working animation. The
+/// initial snapshot covers a turn that began before the roster subscribed;
+/// subsequent values come from gateway start/complete events.
+final botWorkingSessionsProvider = StreamProvider<Set<String>>((ref) async* {
+  final realtime = ref.watch(gatewayRealtimeProvider);
+  if (realtime == null) {
+    yield const <String>{};
+    return;
+  }
+  yield realtime.workingSessionIds;
+  yield* realtime.workingSessions;
+});
+
 class BotsNotifier extends AsyncNotifier<BotsViewState> {
   final Set<String> _knownBotModeGateways = {};
 

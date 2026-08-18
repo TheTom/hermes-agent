@@ -89,12 +89,20 @@ class GatewayRealtime {
 
   final _sessionTouchController = StreamController<SessionTouch>.broadcast();
   final _stateTick = StreamController<void>.broadcast();
+  final _workingSessionController = StreamController<Set<String>>.broadcast();
+  final _workingSessionIds = <String>{};
 
   /// Fires when WS open/closed / reconnect policy changes (Settings UI).
   Stream<void> get stateChanges => _stateTick.stream;
 
   /// Cache was refreshed — UI should re-read sessions / open transcript.
   Stream<SessionTouch> get sessionTouches => _sessionTouchController.stream;
+
+  /// Live session ids that are inside an actual agent turn. Unlike roster
+  /// timestamps, this does not treat a recent system/model-change message as
+  /// proof that a bot is still working.
+  Set<String> get workingSessionIds => Set.unmodifiable(_workingSessionIds);
+  Stream<Set<String>> get workingSessions => _workingSessionController.stream;
 
   GatewayWsState get connectionState => _client.state;
 
@@ -457,6 +465,7 @@ class GatewayRealtime {
     await _events?.cancel();
     await _states?.cancel();
     await _client.disconnect();
+    _clearWorkingSessions();
     _notifyState();
   }
 
@@ -655,6 +664,7 @@ class GatewayRealtime {
           markHealthy();
         }
         if (s == GatewayWsState.closed || s == GatewayWsState.error) {
+          _clearWorkingSessions();
           // Intentional close for force remint must NOT schedule reconnect
           // (that race left Settings stuck on "reconnecting").
           if (_wantConnected && !_gaveUp && !_suppressReconnect) {
@@ -817,6 +827,7 @@ class GatewayRealtime {
 
   void _onEvent(GatewayWsEvent event) {
     final type = event.type;
+    _trackWorkingSession(event);
     // Traffic proves liveness; avoid state-tick spam on high-frequency deltas.
     final isDelta =
         type == 'message.delta' ||
@@ -832,6 +843,39 @@ class GatewayRealtime {
 
     if (type == 'message.complete' || type == 'background.complete') {
       unawaited(_maybeNotifyCompletion(event));
+    }
+  }
+
+  void _trackWorkingSession(GatewayWsEvent event) {
+    final sessionId = event.sessionId?.trim();
+    if (sessionId == null || sessionId.isEmpty) return;
+    final starts =
+        event.type == 'message.start' ||
+        event.type == 'tool.start' ||
+        event.type == 'thinking.start' ||
+        event.type == 'reasoning.start' ||
+        event.type == 'background.start';
+    final stops =
+        event.type == 'message.complete' ||
+        event.type == 'background.complete' ||
+        event.type == 'error' ||
+        event.type == 'session.reclaimed' ||
+        event.type == 'session.closed';
+    final changed = starts
+        ? _workingSessionIds.add(sessionId)
+        : stops
+        ? _workingSessionIds.remove(sessionId)
+        : false;
+    if (changed && !_workingSessionController.isClosed) {
+      _workingSessionController.add(workingSessionIds);
+    }
+  }
+
+  void _clearWorkingSessions() {
+    if (_workingSessionIds.isEmpty) return;
+    _workingSessionIds.clear();
+    if (!_workingSessionController.isClosed) {
+      _workingSessionController.add(const <String>{});
     }
   }
 
@@ -954,6 +998,7 @@ class GatewayRealtime {
     await stop();
     await _sessionTouchController.close();
     await _stateTick.close();
+    await _workingSessionController.close();
     await _client.dispose();
   }
 }
