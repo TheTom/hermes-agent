@@ -53,3 +53,52 @@ def test_ingest_accepts_expanded_health_categories(tmp_path):
     )
 
     assert result["accepted"] == len(samples)
+
+
+def test_summary_prefers_healthkit_daily_steps_and_labels_date(tmp_path):
+    storage = _load()
+    storage.DEFAULT_DB = tmp_path / "health.sqlite3"
+    samples = [
+        {
+            "uuid": "iphone", "type": "STEPS",
+            "dateFrom": "2026-08-15T08:00:00",
+            "dateTo": "2026-08-15T09:00:00",
+            "value": {"numericValue": 57_981},
+            "sourceName": "Tom's iPhone", "sourceId": "com.apple.health",
+        },
+        {
+            "uuid": "garmin", "type": "STEPS",
+            "dateFrom": "2026-08-15T08:00:00",
+            "dateTo": "2026-08-15T09:00:00",
+            "value": {"numericValue": 56_919},
+            "sourceName": "Connect", "sourceId": "com.garmin.connect.mobile",
+        },
+        {
+            "uuid": "daily", "type": "STEPS",
+            "dateFrom": "2026-08-15T00:00:00",
+            "dateTo": "2026-08-16T00:00:00",
+            "value": {"numericValue": 58_377},
+            "sourceName": "Apple Health daily total",
+            "sourceId": storage.DAILY_STEP_SOURCE_ID,
+        },
+    ]
+    storage.ingest(
+        device_id="phone", batch_id="daily-steps", app_version="38",
+        samples=samples,
+    )
+
+    result = storage.summary(
+        "2026-08-15T00:00:00", "2026-08-16T00:00:00", ["steps"],
+    )
+
+    assert result["sample_count"] == 1
+    assert result["metrics"]["STEPS"] == [{
+        "start": "2026-08-15T00:00:00",
+        "end": "2026-08-16T00:00:00",
+        "value": {"numericValue": 58_377},
+        "unit": None,
+        "source": "Apple Health daily total",
+        "date": "2026-08-15",
+        "weekday": "Saturday",
+        "aggregation": "healthkit_daily_total",
+    }]

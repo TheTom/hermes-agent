@@ -17,6 +17,7 @@ from typing import Any, Iterable
 
 PLUGIN_DIR = Path(__file__).resolve().parent
 DEFAULT_DB = PLUGIN_DIR / "data" / "apple_health.sqlite3"
+DAILY_STEP_SOURCE_ID = "app.hermes.go.healthkit.statistics.daily"
 ALLOWED_TYPES = {
     "ACTIVE_ENERGY_BURNED",
     "APPLE_MOVE_TIME",
@@ -203,23 +204,48 @@ def summary(start: str, end: str, metrics: list[str] | None = None) -> dict[str,
         params.extend(requested)
     with connect() as conn:
         rows = conn.execute(
-            f"SELECT type,start_at,end_at,value_json,unit,source_name FROM samples WHERE {where} ORDER BY start_at",
+            f"SELECT type,start_at,end_at,value_json,unit,source_name,source_id "
+            f"FROM samples WHERE {where} ORDER BY start_at",
             params,
         ).fetchall()
+    authoritative_step_dates = {
+        row["start_at"][:10]
+        for row in rows
+        if row["type"] == "STEPS" and row["source_id"] == DAILY_STEP_SOURCE_ID
+    }
     by_type: dict[str, list[dict[str, Any]]] = {}
     for row in rows:
-        by_type.setdefault(row["type"], []).append({
+        kind = row["type"]
+        is_daily_step_total = (
+            kind == "STEPS" and row["source_id"] == DAILY_STEP_SOURCE_ID
+        )
+        if (
+            kind == "STEPS"
+            and row["start_at"][:10] in authoritative_step_dates
+            and not is_daily_step_total
+        ):
+            continue
+        value = {
             "start": row["start_at"], "end": row["end_at"],
             "value": json.loads(row["value_json"]), "unit": row["unit"],
             "source": row["source_name"],
-        })
+        }
+        if is_daily_step_total:
+            local_date = row["start_at"][:10]
+            value.update({
+                "date": local_date,
+                "weekday": datetime.fromisoformat(local_date).strftime("%A"),
+                "aggregation": "healthkit_daily_total",
+            })
+        by_type.setdefault(kind, []).append(value)
     # Bound tool output. Daily coaching needs trends, not an unbounded raw dump.
     truncated = False
     for kind, values in list(by_type.items()):
         if len(values) > 500:
             truncated = True
             by_type[kind] = values[-500:]
-    return {"start": start, "end": end, "sample_count": len(rows), "metrics": by_type,
+    returned_count = sum(len(values) for values in by_type.values())
+    return {"start": start, "end": end, "sample_count": returned_count, "metrics": by_type,
             "truncated": truncated}
 
 

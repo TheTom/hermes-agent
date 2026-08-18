@@ -28,4 +28,32 @@ void main() {
       ]),
     );
   });
+
+  test('daily step intervals use local calendar boundaries', () {
+    final intervals = AppleHealthSync.dailyStepIntervals(
+      DateTime(2026, 8, 14, 18, 30),
+      DateTime(2026, 8, 16, 10),
+    );
+
+    expect(intervals, hasLength(3));
+    expect(intervals.first.start, DateTime(2026, 8, 14));
+    expect(intervals.first.end, DateTime(2026, 8, 15));
+    expect(intervals.last.start, DateTime(2026, 8, 16));
+    expect(intervals.last.end, DateTime(2026, 8, 17));
+  });
+
+  test('daily step payload is deterministic and marked authoritative', () {
+    final payload = AppleHealthSync.dailyStepPayload(
+      start: DateTime(2026, 8, 15),
+      end: DateTime(2026, 8, 16),
+      total: 58377,
+    );
+
+    expect(payload['uuid'], 'hermes-go-healthkit-daily-steps:2026-08-15');
+    expect(payload['sourceId'], AppleHealthSync.dailyStepSourceId);
+    expect(payload['value'], {
+      '__type': 'NumericHealthValue',
+      'numericValue': 58377.0,
+    });
+  });
 }

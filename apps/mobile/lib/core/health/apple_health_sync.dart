@@ -18,6 +18,9 @@ class AppleHealthSync {
   final DashboardClient dashboard;
   final Health _health = Health();
 
+  static const dailyStepSourceId = 'app.hermes.go.healthkit.statistics.daily';
+  static const dailyStepAggregationVersion = 1;
+
   /// HealthKit data used by the private gateway dataset. Keep this broad: a
   /// coach cannot infer which measurements the user records, and HealthKit's
   /// consent sheet remains the place where the user narrows access.
@@ -90,6 +93,8 @@ class AppleHealthSync {
   String get _diagnosticsKey => 'hermes_go_health_diagnostics:$gatewayId';
   String get _authorizationVersionKey =>
       'hermes_go_health_authorization_version:$gatewayId';
+  String get _dailyStepVersionKey =>
+      'hermes_go_health_daily_step_version:$gatewayId';
   final _storage = ConnectionStore.durableSecureStorage();
 
   Future<bool> get isEnabled async =>
@@ -112,6 +117,7 @@ class AppleHealthSync {
     await _storage.delete(key: _cursorKey);
     await _storage.delete(key: _diagnosticsKey);
     await _storage.delete(key: _authorizationVersionKey);
+    await _storage.delete(key: _dailyStepVersionKey);
   }
 
   Future<Map<String, int>> get lastReadCounts async {
@@ -161,24 +167,33 @@ class AppleHealthSync {
     final cursor = DateTime.tryParse(saved ?? '');
     // One-day overlap catches delayed Watch writes; server UUID upserts make it
     // safe. First consent gets 30 useful days without an enormous history dump.
-    final start = initial || cursor == null
+    final sampleStart = initial || cursor == null
         ? now.subtract(const Duration(days: 30))
         : cursor.toUtc().subtract(const Duration(days: 1));
+    final needsDailyStepBackfill =
+        await _storage.read(key: _dailyStepVersionKey) !=
+        '$dailyStepAggregationVersion';
+    final dailyStepStart = needsDailyStepBackfill
+        ? now.subtract(const Duration(days: 30))
+        : sampleStart;
     // Query each type separately. Besides preventing one unavailable HealthKit
     // type from aborting the whole sync, this gives the UI an honest account
     // of what the phone actually returned (HealthKit does not disclose denied
     // read permissions directly).
-    final points = <HealthDataPoint>[];
+    final payloads = <Map<String, dynamic>>[];
     final readByType = <String, int>{};
     final errors = <String>[];
     for (final type in types) {
+      if (type == HealthDataType.STEPS) {
+        continue;
+      }
       try {
         final values = await _health.getHealthDataFromTypes(
           types: [type],
-          startTime: start,
+          startTime: sampleStart,
           endTime: now,
         );
-        points.addAll(values);
+        payloads.addAll(values.map((value) => value.toJson()));
         readByType[type.name] = values.length;
       } catch (error) {
         readByType[type.name] = 0;
@@ -186,14 +201,37 @@ class AppleHealthSync {
         debugPrint('AppleHealthSync: could not read ${type.name}: $error');
       }
     }
+    var dailyStepsSucceeded = false;
+    try {
+      final dailySteps = <Map<String, dynamic>>[];
+      for (final interval in dailyStepIntervals(dailyStepStart, now)) {
+        final total = await _health.getTotalStepsInInterval(
+          interval.start,
+          interval.end,
+        );
+        if (total != null) {
+          dailySteps.add(
+            dailyStepPayload(
+              start: interval.start,
+              end: interval.end,
+              total: total,
+            ),
+          );
+        }
+      }
+      payloads.addAll(dailySteps);
+      readByType[HealthDataType.STEPS.name] = dailySteps.length;
+      dailyStepsSucceeded = true;
+    } catch (error) {
+      readByType[HealthDataType.STEPS.name] = 0;
+      errors.add(HealthDataType.STEPS.name);
+      debugPrint('AppleHealthSync: could not read daily STEPS: $error');
+    }
     var accepted = 0;
     const batchSize = 500;
-    for (var offset = 0; offset < points.length; offset += batchSize) {
-      final end = (offset + batchSize).clamp(0, points.length);
-      final payload = points
-          .sublist(offset, end)
-          .map((p) => p.toJson())
-          .toList();
+    for (var offset = 0; offset < payloads.length; offset += batchSize) {
+      final end = (offset + batchSize).clamp(0, payloads.length);
+      final payload = payloads.sublist(offset, end);
       final response = await dashboard.syncAppleHealth({
         'schema_version': 1,
         'device_id': _health.deviceId,
@@ -205,13 +243,63 @@ class AppleHealthSync {
     }
     await _storage.write(key: _cursorKey, value: now.toIso8601String());
     await _storage.write(key: _diagnosticsKey, value: jsonEncode(readByType));
-    debugPrint('AppleHealthSync: ${points.length} read, $accepted accepted');
+    if (dailyStepsSucceeded) {
+      await _storage.write(
+        key: _dailyStepVersionKey,
+        value: '$dailyStepAggregationVersion',
+      );
+    }
+    debugPrint('AppleHealthSync: ${payloads.length} read, $accepted accepted');
     return AppleHealthSyncResult(
-      read: points.length,
+      read: payloads.length,
       accepted: accepted,
       readByType: readByType,
       failedTypes: errors,
     );
+  }
+
+  @visibleForTesting
+  static List<({DateTime start, DateTime end})> dailyStepIntervals(
+    DateTime start,
+    DateTime end,
+  ) {
+    final localStart = start.toLocal();
+    final localEnd = end.toLocal();
+    var day = DateTime(localStart.year, localStart.month, localStart.day);
+    final intervals = <({DateTime start, DateTime end})>[];
+    while (day.isBefore(localEnd)) {
+      final nextDay = DateTime(day.year, day.month, day.day + 1);
+      intervals.add((start: day, end: nextDay));
+      day = nextDay;
+    }
+    return intervals;
+  }
+
+  @visibleForTesting
+  static Map<String, dynamic> dailyStepPayload({
+    required DateTime start,
+    required DateTime end,
+    required int total,
+  }) {
+    final date = [
+      start.year.toString().padLeft(4, '0'),
+      start.month.toString().padLeft(2, '0'),
+      start.day.toString().padLeft(2, '0'),
+    ].join('-');
+    return {
+      'uuid': 'hermes-go-healthkit-daily-steps:$date',
+      'type': HealthDataType.STEPS.name,
+      'dateFrom': start.toIso8601String(),
+      'dateTo': end.toIso8601String(),
+      'value': {
+        '__type': 'NumericHealthValue',
+        'numericValue': total.toDouble(),
+      },
+      'unit': HealthDataUnit.COUNT.name,
+      'sourceName': 'Apple Health daily total',
+      'sourceId': dailyStepSourceId,
+      'recordingMethod': 'automatic',
+    };
   }
 }
 

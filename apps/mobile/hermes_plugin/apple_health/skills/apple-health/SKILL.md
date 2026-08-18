@@ -20,6 +20,10 @@ source for this profile.
    stale. Never substitute an older value as if it were current.
 4. Analyze trends conservatively and do not diagnose medical conditions.
 
+`STEPS` records marked `healthkit_daily_total` are HealthKit's reconciled
+daily statistics. Treat each as the complete total for its included `date` and
+use the supplied `weekday`; do not add source samples or recalculate weekdays.
+
 Do not inspect `~/.hermes/health/daily_data`, use an iOS Shortcut export, or
 ask the user to run a Shortcut. Those files belong to a retired pipeline and
 are not the source used by Hermes Go.

@@ -15,7 +15,9 @@ _SUMMARY_DESCRIPTION = (
     "Read Apple Health samples for an explicit, bounded date range. Always "
     "choose only the metrics needed for the user's question. For sleep, "
     "request the available SLEEP_* metrics and bound start/end to the night "
-    "being discussed. Use for health coaching and trends; do not diagnose."
+    "being discussed. STEPS uses HealthKit's reconciled daily totals and "
+    "includes authoritative date and weekday labels. Use for health coaching "
+    "and trends; do not diagnose."
 )
 _STATUS_SCHEMA = {
     "name": "apple_health_status",
