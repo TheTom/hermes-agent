@@ -108,7 +108,10 @@ test('sessions workspace: a gateway lifecycle change clears selection and reject
   assert.deepEqual(plain(runtime.__sessions.$botSelectedSessions.get()), {})
 
   await runtime.__sessions.openProfileSession('ops', 'stored-123', 0)
-  assert.deepEqual(runtime.calls, [])
+  assert.deepEqual(
+    plain(runtime.calls.map(([method]) => method)),
+    ['profiles.list']
+  )
 })
 
 test('sessions workspace: an in-flight open cannot restore selection after gateway replacement', async () => {
@@ -118,7 +121,8 @@ test('sessions workspace: an in-flight open cannot restore selection after gatew
   })
 
   await runtime.__sessions.openProfileSession('ops', 'stored-123', 0)
-  assert.equal(runtime.calls.length, 1)
+  assert.equal(runtime.calls.filter(([method]) => method === 'openSession').length, 1)
+  assert.equal(runtime.calls.filter(([method]) => method === 'profiles.list').length, 1)
   assert.deepEqual(plain(runtime.__sessions.$botSelectedSessions.get()), {})
 })
 
