@@ -58,11 +58,16 @@ void main() {
   });
 
   test('new bot chats open without an injected starter message', () {
+    var sessionsOpened = false;
     final screen = buildBotChatScreen(
       session: HermesSession(id: 'new-bot-chat'),
       profileName: 'fitness-coach',
+      onOpenSessions: () => sessionsOpened = true,
     );
 
     expect(screen.initialMessage, isNull);
+    expect(screen.onOpenBotSessions, isNotNull);
+    screen.onOpenBotSessions!();
+    expect(sessionsOpened, isTrue);
   });
 }

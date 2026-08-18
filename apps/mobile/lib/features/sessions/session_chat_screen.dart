@@ -283,6 +283,7 @@ class SessionChatScreen extends ConsumerStatefulWidget {
     this.onSessionUpdated,
     this.onNewChat,
     this.onOpenSessionId,
+    this.onOpenBotSessions,
     this.profileName,
   });
 
@@ -304,6 +305,10 @@ class SessionChatScreen extends ConsumerStatefulWidget {
 
   /// `/resume <id>` — parent opens that session if known.
   final ValueChanged<String>? onOpenSessionId;
+
+  /// Bot chats expose their conversation history and new-session action from
+  /// the chat itself, instead of requiring a return to the Bots roster.
+  final VoidCallback? onOpenBotSessions;
 
   /// Non-null for Bot Mode chats, whose durable session belongs to a named
   /// server profile rather than the gateway's default profile.
@@ -2298,6 +2303,12 @@ class SessionChatScreenState extends ConsumerState<SessionChatScreen> {
           ),
         ),
         actions: [
+          if (widget.onOpenBotSessions != null)
+            TextButton.icon(
+              onPressed: widget.onOpenBotSessions,
+              icon: const Icon(Icons.forum_outlined, size: 18),
+              label: const Text('Sessions'),
+            ),
           IconButton(
             tooltip: context.l10n.sync,
             onPressed: _loading ? null : _load,

@@ -598,8 +598,11 @@ Future<void> _openBotChat(
     if (!context.mounted) return;
     await Navigator.of(context).push<void>(
       MaterialPageRoute<void>(
-        builder: (_) =>
-            buildBotChatScreen(session: target.session, profileName: bot.name),
+        builder: (routeContext) => buildBotChatScreen(
+          session: target.session,
+          profileName: bot.name,
+          onOpenSessions: () => showBotSessionsSheet(routeContext, bot: bot),
+        ),
       ),
     );
     if (context.mounted) {
@@ -616,6 +619,11 @@ Future<void> _openBotChat(
 SessionChatScreen buildBotChatScreen({
   required HermesSession session,
   required String profileName,
+  VoidCallback? onOpenSessions,
 }) {
-  return SessionChatScreen(session: session, profileName: profileName);
+  return SessionChatScreen(
+    session: session,
+    profileName: profileName,
+    onOpenBotSessions: onOpenSessions,
+  );
 }
