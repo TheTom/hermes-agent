@@ -44,6 +44,7 @@ function renderBotRow(input = 'alpha') {
     $lastRoster: atom([]),
     $selectedBot: atom('default'),
     botAppearance: () => ({ shape: 'round', color: '#000', image: null }),
+    botGroups: () => [],
     botHandle: value => value,
     botRosterMeta: (_bot, metaByName) => metaByName?.[_bot.name] ?? null,
     cn: (...values) => values.filter(Boolean).join(' '),
@@ -85,6 +86,7 @@ function renderBotRow(input = 'alpha') {
     relativeTime: () => 'now',
     saveBotMeta: () => undefined,
     showsHandle: () => false,
+    stripPreviewMarkdown: text => String(text || ''),
     useValue: store => store.get()
   }
 
@@ -168,6 +170,7 @@ test('behavior: remote default does not open this-device chat when the source di
     $lastRoster: atom([]),
     $selectedBot: atom('default'),
     botAppearance: () => ({ shape: 'round', color: '#000', image: null }),
+    botGroups: () => [],
     botHandle: value => value,
     botRosterMeta: () => null,
     cn: (...values) => values.filter(Boolean).join(' '),
@@ -202,6 +205,7 @@ test('behavior: remote default does not open this-device chat when the source di
     relativeTime: () => 'now',
     saveBotMeta: () => undefined,
     showsHandle: () => false,
+    stripPreviewMarkdown: text => String(text || ''),
     useValue: store => store.get()
   }
 

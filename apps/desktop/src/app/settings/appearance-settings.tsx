@@ -20,7 +20,23 @@ import { $reactionsEnabled, setReactionsEnabled } from '@/store/reactions-enable
 import { $reasoningCollapsedByDefault, setReasoningCollapsedByDefault } from '@/store/reasoning-disclosure'
 import { $sessionListDensity, type SessionListDensity, setSessionListDensity } from '@/store/session-list-density'
 import { $toolViewMode, setToolViewMode } from '@/store/tool-view'
-import { $translucency, setTranslucency } from '@/store/translucency'
+import {
+  $translucency,
+  beginTranslucencyPeek,
+  endTranslucencyPeek,
+  GLASS_MATERIALS,
+  GLASS_SCOPES,
+  GLASS_SUPPORTED,
+  pulseTranslucencyPeek,
+  resetTranslucencyPeek,
+  setTranslucency,
+  setTranslucencyMaterial,
+  setTranslucencyMode,
+  setTranslucencyScope,
+  TRANSLUCENCY_MAX,
+  TRANSLUCENCY_MIN,
+  TRANSLUCENCY_STEP
+} from '@/store/translucency'
 import { $zoomPercent, setZoomPercent } from '@/store/zoom'
 import { getBaseColors, useTheme } from '@/themes/context'
 import { installVscodeThemeFromMarketplace } from '@/themes/install'
@@ -30,7 +46,9 @@ import { $marketplaceInstalls, isUserTheme, removeUserTheme } from '@/themes/use
 import { MODE_OPTIONS } from './constants'
 import { PetSettings } from './pet-settings'
 import { ListRow, SectionHeading, SettingsContent, ToggleRow } from './primitives'
+import { APPEARANCE_SETTING_IDS } from './settings-search'
 import { TerminalFontSetting } from './terminal-font-setting'
+import { useDeepLinkHighlight } from './use-deep-link-highlight'
 
 function ThemePreview({ name, mode }: { name: string; mode: 'light' | 'dark' }) {
   // Preview in the *current* mode: the dark palette in Dark, and the light
@@ -75,6 +93,8 @@ function ThemePreview({ name, mode }: { name: string; mode: 'light' | 'dark' }) 
 // presets highlights nothing, and the row description keeps showing the
 // exact current percent.
 const UI_SCALE_PRESETS = ['90', '100', '110', '125', '150', '175'] as const
+const APPEARANCE_SEARCH_TARGETS = new Set<string>(Object.values(APPEARANCE_SETTING_IDS))
+const appearanceSettingElementId = (id: string) => `setting-field-${id}`
 
 type UiScalePreset = (typeof UI_SCALE_PRESETS)[number]
 
@@ -247,6 +267,19 @@ function MarketplaceThemeResults({
   )
 }
 
+// Keys a range input treats as a step, so the peek can flash the live window
+// for keyboard adjustment the way a pointer drag holds it open.
+const SLIDER_STEP_KEYS = new Set([
+  'ArrowDown',
+  'ArrowLeft',
+  'ArrowRight',
+  'ArrowUp',
+  'End',
+  'Home',
+  'PageDown',
+  'PageUp'
+])
+
 export function AppearanceSettings() {
   const { t, isSavingLocale } = useI18n()
   const { themeName, mode, resolvedMode, availableThemes, setTheme, setMode } = useTheme()
@@ -265,7 +298,33 @@ export function AppearanceSettings() {
   const activeProfileKey = normalizeProfileKey(useStore($activeGatewayProfile))
   const a = t.settings.appearance
 
+  // A pointer held on the intensity slider when this overlay closes (Escape
+  // mid-drag) never delivers its pointerup here, which would strand the peek
+  // counter above zero and ghost the NEXT settings overlay. Unmount drops
+  // every outstanding hold.
+  useEffect(() => resetTranslucencyPeek, [])
+
+  // Shared by the mode/frost/area pickers: apply the choice, then show it
+  // through the overlay it just altered (a pulse, not a hold — see the peek
+  // notes on the slider itself).
+  const pickTranslucency =
+    <T,>(set: (value: T) => void) =>
+    (value: T) => {
+      triggerHaptic('selection')
+      set(value)
+
+      if (translucency.intensity > 0) {
+        pulseTranslucencyPeek()
+      }
+    }
+
   const [query, setQuery] = useState('')
+
+  useDeepLinkHighlight({
+    elementId: appearanceSettingElementId,
+    param: 'setting',
+    ready: id => APPEARANCE_SEARCH_TARGETS.has(id)
+  })
 
   // One box does double duty: filter installed themes live (below), and run a
   // name search against the VS Code Marketplace (the Cmd-K "Install theme…"
@@ -325,6 +384,7 @@ export function AppearanceSettings() {
           <ListRow
             action={<LanguageSwitcher />}
             description={isSavingLocale ? t.language.saving : t.language.description}
+            id={appearanceSettingElementId(APPEARANCE_SETTING_IDS.language)}
             title={t.language.label}
           />
 
@@ -412,6 +472,7 @@ export function AppearanceSettings() {
               </>
             }
             description={a.themeDesc}
+            id={appearanceSettingElementId(APPEARANCE_SETTING_IDS.theme)}
             title={
               <div className="flex items-center justify-between gap-3">
                 <span>{a.themeTitle}</span>
@@ -440,6 +501,7 @@ export function AppearanceSettings() {
               />
             }
             description={a.uiScaleDesc(zoomPercent)}
+            id={appearanceSettingElementId(APPEARANCE_SETTING_IDS.uiScale)}
             title={a.uiScaleTitle}
           />
 
@@ -462,27 +524,90 @@ export function AppearanceSettings() {
 
           <ListRow
             action={
-              <div className="flex items-center gap-3">
+              <div
+                className="flex items-center gap-3"
+                // Arms the peek for the overlay this row lives in — the
+                // ghosting rules in styles.css scope to it, so no other
+                // overlay pays for an opacity transition it never uses.
+                data-translucency-peek-scope=""
+              >
+                {GLASS_SUPPORTED && (
+                  <SegmentedControl
+                    onChange={pickTranslucency(setTranslucencyMode)}
+                    options={[
+                      { id: 'clear' as const, label: a.translucencyModeClear },
+                      { id: 'glass' as const, label: a.translucencyModeGlass }
+                    ]}
+                    value={translucency.mode}
+                  />
+                )}
                 <input
                   aria-label={a.translucencyTitle}
                   className="h-1 w-40 cursor-pointer appearance-none rounded-full bg-(--ui-stroke-tertiary)"
-                  max={100}
-                  min={0}
+                  max={TRANSLUCENCY_MAX}
+                  min={TRANSLUCENCY_MIN}
+                  // Peek while the hand is on the slider: the overlay (scrim +
+                  // near-opaque card) ghosts so the window behind IS the live
+                  // preview. Pointer pair covers mouse/touch drags; the
+                  // keyboard path pulses per step instead (blur ends any
+                  // residual hold).
+                  onBlur={endTranslucencyPeek}
                   onChange={event => {
                     triggerHaptic('selection')
                     setTranslucency(Number(event.target.value))
                   }}
-                  step={5}
+                  onKeyDown={event => {
+                    if (SLIDER_STEP_KEYS.has(event.key)) {
+                      pulseTranslucencyPeek()
+                    }
+                  }}
+                  onLostPointerCapture={endTranslucencyPeek}
+                  onPointerDown={beginTranslucencyPeek}
+                  onPointerUp={endTranslucencyPeek}
+                  step={TRANSLUCENCY_STEP}
                   style={{ accentColor: 'var(--dt-primary)' }}
                   type="range"
-                  value={translucency}
+                  value={translucency.intensity}
                 />
                 <span className="w-9 text-right text-[length:var(--conversation-caption-font-size)] tabular-nums text-(--ui-text-tertiary)">
-                  {translucency}%
+                  {translucency.intensity}%
                 </span>
               </div>
             }
-            description={a.translucencyDesc}
+            below={
+              translucency.mode === 'glass' && GLASS_SUPPORTED ? (
+                <div className="mt-3 flex flex-col gap-2.5">
+                  <div className="flex items-center gap-3">
+                    <span className="w-12 text-[length:var(--conversation-caption-font-size)] text-(--ui-text-tertiary)">
+                      {a.translucencyFrostTitle}
+                    </span>
+                    <SegmentedControl
+                      onChange={pickTranslucency(setTranslucencyMaterial)}
+                      options={GLASS_MATERIALS.map(material => ({
+                        id: material,
+                        label: a.translucencyFrost[material]
+                      }))}
+                      value={translucency.material}
+                    />
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <span className="w-12 text-[length:var(--conversation-caption-font-size)] text-(--ui-text-tertiary)">
+                      {a.translucencyScopeTitle}
+                    </span>
+                    <SegmentedControl
+                      onChange={pickTranslucency(setTranslucencyScope)}
+                      options={GLASS_SCOPES.map(scope => ({
+                        id: scope,
+                        label: a.translucencyScope[scope]
+                      }))}
+                      value={translucency.scope}
+                    />
+                  </div>
+                </div>
+              ) : undefined
+            }
+            description={translucency.mode === 'glass' ? a.translucencyGlassDesc : a.translucencyDesc}
+            id={appearanceSettingElementId(APPEARANCE_SETTING_IDS.translucency)}
             title={a.translucencyTitle}
           />
 
@@ -501,6 +626,7 @@ export function AppearanceSettings() {
               />
             }
             description={a.backdropDesc}
+            id={appearanceSettingElementId(APPEARANCE_SETTING_IDS.backdrop)}
             title={a.backdropTitle}
           />
 
@@ -541,6 +667,7 @@ export function AppearanceSettings() {
               />
             }
             description={a.toolViewDesc}
+            id={appearanceSettingElementId(APPEARANCE_SETTING_IDS.toolView)}
             title={a.toolViewTitle}
           />
 
@@ -588,6 +715,7 @@ export function AppearanceSettings() {
               </div>
             }
             description={a.embedsDesc}
+            id={appearanceSettingElementId(APPEARANCE_SETTING_IDS.embeds)}
             title={a.embedsTitle}
           />
         </div>

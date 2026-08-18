@@ -1,4 +1,5 @@
 import type { GatewayWsUrlResult } from '@hermes/shared'
+import type { TranslucencyState } from '@hermes/shared/translucency'
 
 import type { WakeIndicatorState } from './lib/wake-indicator'
 import type {
@@ -226,7 +227,7 @@ declare global {
       setActiveWork?: (payload: HermesActiveWork) => void
       setTitleBarTheme?: (payload: HermesTitleBarTheme) => void
       setNativeTheme?: (mode: 'dark' | 'light' | 'system') => void
-      setTranslucency?: (payload: { intensity: number }) => void
+      setTranslucency?: (payload: TranslucencyState) => void
       setKeepAwake?: (on: boolean) => void
       setDisableF12?: (blocked: boolean) => void
       setPreviewShortcutActive?: (active: boolean) => void
@@ -349,7 +350,9 @@ declare global {
         start: (options?: { cols?: number; cwd?: string; rows?: number }) => Promise<HermesTerminalSession>
         write: (id: string, data: string) => Promise<boolean>
       }
+      reachPreviewUrl?: (url: string) => Promise<string>
       onClosePreviewRequested?: (callback: () => void) => () => void
+      onPreviewNav?: (callback: (command: 'back' | 'forward' | 'reload') => void) => () => void
       onOpenFolderRequested?: (callback: () => void) => () => void
       onOpenUpdatesRequested?: (callback: () => void) => () => void
       onDeepLink?: (
@@ -617,8 +620,9 @@ export interface HermesConnection {
   // Set for pool (non-primary) backends so the renderer knows which profile a
   // connection belongs to.
   profile?: string
-  // The registry connection this descriptor was resolved through (absent on
-  // legacy v1/primary paths). Set by getConnectionFor.
+  // The registry connection this descriptor resolves to. Registry-scoped
+  // secondaries carry it directly; legacy primary remotes preserve it from
+  // their selected stored route before dialing.
   connectionId?: string
   // True only when `profile` is a request scope on the shared primary backend.
   // A pooled backend also carries `profile`, so presence alone cannot identify
@@ -763,6 +767,11 @@ export interface DesktopRegistryConnection {
   // header VALUES are secrets and never cross the IPC boundary. Optional so
   // fixtures/older payloads without the field remain valid.
   headerNames?: string[]
+  // Last-known stable backend identity (the /api/status `install_id`).
+  // Present once a roster enumeration or connection test has seen it; two
+  // connections sharing it are one physical backend registered under two
+  // addresses (display-only "Same backend as …" hint in Settings).
+  installId?: string
 }
 
 export interface DesktopConnectionsRegistry {
@@ -817,6 +826,8 @@ export interface DesktopAgentRoster {
     kind: DesktopConnectionKind
     reachable: boolean
     error?: string
+    // Stable backend identity (/api/status install_id) when known.
+    installId?: string
   }[]
 }
 

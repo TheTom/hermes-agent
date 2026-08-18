@@ -273,6 +273,7 @@ export const en: Translations = {
       'view.toggleReview': 'Toggle review pane',
       'view.toggleStatusbar': 'Toggle status bar',
       'view.showFiles': 'Show file browser',
+      'view.showBrowser': 'Open browser',
       'view.toggleHud': 'Toggle HUD mode',
       'hud.snapToPointer': 'Move HUD to pointer (global, while HUD is open)',
       'view.showTerminal': 'Toggle terminal',
@@ -354,8 +355,7 @@ export const en: Translations = {
       providerAccounts: 'Accounts',
       providerApiKeys: 'API keys',
       providerCustomEndpoints: 'Custom Endpoints',
-      gateway: 'Gateway',
-      connections: 'Connections',
+      gateway: 'Gateways',
       apiKeys: 'Tools & Keys',
       keybinds: 'Keyboard Shortcuts',
       keysTools: 'Tools',
@@ -382,7 +382,8 @@ export const en: Translations = {
       agent: {
         title: 'Agent plugins',
         blurb:
-          'Run in the Hermes backend — tools, skills, MCP servers, hooks, and slash commands. Portable ones are Agent Plugins packages (skills + MCP bundles that work in other agents too). Toggles apply to new sessions.',
+          'Plugins you installed into the Hermes backend — tools, skills, MCP servers, hooks, and slash commands. Portable ones are Agent Plugins packages (skills + MCP bundles that work in other agents too). Toggles apply to new sessions.',
+        appliesTo: 'Applies to:',
         empty: 'No agent plugins installed yet.',
         loadFailed: 'Could not load agent plugins',
         portable: 'portable',
@@ -486,6 +487,22 @@ export const en: Translations = {
       terminalFontReset: 'Use default',
       translucencyTitle: 'Window Translucency',
       translucencyDesc: 'See your desktop through the whole window. macOS and Windows only.',
+      translucencyGlassDesc:
+        'Matte glass: the desktop shows through as a smooth blur while text stays sharp. macOS only.',
+      translucencyModeClear: 'Clear',
+      translucencyModeGlass: 'Glass',
+      translucencyFrostTitle: 'Frost',
+      translucencyFrost: {
+        'under-window': 'Deep',
+        popover: 'Soft',
+        titlebar: 'Bright',
+        header: 'Glare'
+      },
+      translucencyScopeTitle: 'Area',
+      translucencyScope: {
+        window: 'Whole window',
+        sidebar: 'Sidebar only'
+      },
       backdropTitle: 'Chat Backdrop',
       backdropDesc: 'The faint statue image behind the conversation.',
       reactionsTitle: 'Message Reactions',
@@ -696,6 +713,13 @@ export const en: Translations = {
       headerValueSaved: 'Saved — leave blank to keep',
       headerAdd: 'Add header',
       headerRemove: 'Remove',
+      duplicateLocal: 'This app already manages a local connection — there can only be one.',
+      duplicateUrl: (label: string) => `A connection to this gateway URL already exists (“${label}”).`,
+      duplicateSsh: (label: string) => `A connection to this SSH host already exists (“${label}”).`,
+      sameBackendHint: (label: string) => `Same backend as “${label}”`,
+      localAddHint: 'Local is unavailable: the managed local connection already exists (there is only ever one).',
+      cloudAddHint:
+        'Tip: signing in under Hermes Cloud above discovers your agents automatically — use this form only to register a known instance URL by hand.',
       save: 'Save connection',
       saving: 'Saving…',
       cancel: 'Cancel',
@@ -708,20 +732,13 @@ export const en: Translations = {
       title: 'Gateway Connection',
       envOverride: 'env override',
       intro:
-        'Local by default. Use remote when this app should drive a Hermes backend elsewhere. Per-profile overrides below.',
-      appliesTo: 'Applies to',
-      allProfiles: 'All profiles',
-      defaultConnection: 'Default connection for every profile that has no override of its own.',
-      profileConnection: profile =>
-        `Connection used only when “${profile}” is the active profile. Choose Use default gateway to remove its override.`,
+        'Local by default. Use remote when this app should drive a Hermes backend elsewhere. Gateway connections are machine-level; profiles are discovered from the gateways you connect.',
       envOverrideTitle: 'Environment variables are controlling this desktop session.',
       envOverrideDesc:
         'Unset HERMES_DESKTOP_REMOTE_URL and HERMES_DESKTOP_REMOTE_TOKEN to use the saved setting below.',
       modeTitle: 'Connection mode',
       localTitle: 'Local gateway',
       localDesc: 'Start a private Hermes backend on localhost. This is the default and works offline.',
-      inheritTitle: 'Use default gateway',
-      inheritDesc: "Remove this profile's override and use the default connection.",
       remoteTitle: 'Remote gateway',
       remoteDesc: 'Connect this desktop shell to a remote Hermes backend.',
       remoteAuthHint: 'Hosted gateways use OAuth or a username and password; self-hosted ones may use a session token.',
@@ -828,8 +845,6 @@ export const en: Translations = {
       sshHermesPathTitle: 'Hermes path (optional)',
       sshHermesPathDesc: 'Full path to the remote hermes binary. Blank = auto-detect.',
       sshHermesPathPlaceholder: 'auto-detect',
-      sshRemoteProfileTitle: 'Remote profile (optional)',
-      sshRemoteProfileDesc: 'Profile name on the remote host. Blank = use the Desktop profile name.',
       sshTestConnection: 'Test SSH',
       sshConnect: 'Connect',
       sshButtonsHint: 'Save applies on the next launch. Connect reconnects now.',
@@ -852,6 +867,14 @@ export const en: Translations = {
       loading: 'Loading API keys and credentials...',
       failedLoad: 'API keys failed to load',
       empty: 'Nothing configured in this category yet.'
+    },
+    search: {
+      placeholder: 'Search all settings…',
+      pill: 'Search'
+    },
+    profileScope: {
+      appliesTo: 'Applies to',
+      editsProfile: profile => `Changes on this page apply to the “${profile}” profile.`
     },
     mcp: {
       loading: 'Loading MCP servers...',
@@ -1395,8 +1418,10 @@ export const en: Translations = {
     gatewayStopped: 'Messaging gateway stopped',
     hermesActiveSessions: (version, count) => `Hermes ${version} · Active sessions ${count}`,
     restartGateway: 'Restart gateway',
+    openBrowser: 'Open browser',
     gatewayRestartFailed: 'Gateway restart failed.',
     updateHermes: 'Update Hermes',
+    reloadWindow: 'Reload window',
     actionRunning: 'running',
     actionDone: 'done',
     actionFailed: 'failed',
@@ -1756,6 +1781,9 @@ export const en: Translations = {
     renameTitle: 'Rename profile',
     renameDescPrefix: 'Renaming updates the profile directory and any wrapper scripts in ',
     renameDescSuffix: '.',
+    displayNameTitle: 'Name this agent',
+    displayNameDesc: 'Sets a display name shown across the app. The internal profile ID stays "default".',
+    displayNameLabel: 'Display name',
     newNameLabel: 'New name',
     renaming: 'Renaming...',
     created: 'Profile created',
@@ -2851,6 +2879,8 @@ export const en: Translations = {
     web: {
       appFailedToBoot: 'Preview app failed to boot',
       serverNotFound: 'Server not found',
+      remoteLoopback:
+        'This address points at the machine running your agent, not this one. The browser pane loads pages locally, so a remote dev server needs a port forward or a reachable hostname.',
       failedToLoad: 'Preview failed to load',
       tryAgain: 'Try again',
       restarting: 'Hermes is restarting...',
@@ -2864,6 +2894,12 @@ export const en: Translations = {
       showConsole: 'Show preview console',
       hideDevTools: 'Hide preview DevTools',
       openDevTools: 'Open preview DevTools',
+      goBack: 'Back',
+      goForward: 'Forward',
+      reload: 'Reload page',
+      address: 'Address',
+      addressPlaceholder: 'Enter address',
+      blankPageBody: 'Type an address above to browse, or ask Hermes to open a page.',
       finishedRestarting: message => `Hermes finished restarting the preview server${message ? `: ${message}` : ''}`,
       failedRestarting: message => `Server restart failed: ${message}`,
       unknownError: 'unknown error',

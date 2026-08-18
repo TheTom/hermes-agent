@@ -1,9 +1,4 @@
-export {
-  backendScopeKey,
-  backendScopePrefix,
-  LOCAL_CONNECTION_ID,
-  registryBackendScopeKey
-} from './backend-scope'
+export { backendScopeKey, backendScopePrefix, LOCAL_CONNECTION_ID, registryBackendScopeKey } from './backend-scope'
 export {
   BILLING_REFUSAL_POLICY,
   type BillingRecovery,
@@ -67,6 +62,30 @@ export {
   type SkinColors,
   type SkinColorToken
 } from './skin'
+export {
+  clampIntensity,
+  DEFAULT_GLASS_MATERIAL,
+  DEFAULT_GLASS_SCOPE,
+  GLASS_MATERIALS,
+  GLASS_SCOPES,
+  glassActive,
+  type GlassMaterial,
+  type GlassScope,
+  glassSurfaceKeep,
+  normalizeMaterial,
+  normalizeMode,
+  normalizeScope,
+  normalizeState,
+  TRANSLUCENCY_CURVE,
+  TRANSLUCENCY_MAX,
+  TRANSLUCENCY_MIN,
+  TRANSLUCENCY_OPACITY_FLOOR,
+  TRANSLUCENCY_STEP,
+  type TranslucencyMode,
+  type TranslucencyState,
+  vibrancyFor,
+  windowOpacityFor
+} from './translucency'
 export {
   buildHermesWebSocketUrl,
   type GatewayAuthMode,

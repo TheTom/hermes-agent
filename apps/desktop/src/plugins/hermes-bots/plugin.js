@@ -132,6 +132,12 @@ function trackInboundActivity(roster) {
 
     $botUnread.set({ ...$botUnread.get(), [bot.name]: true })
 
+    // Roster-hidden bots stay quiet: the unread flag above accumulates
+    // silently (unhiding reveals the badge) but a hidden bot never toasts.
+    if ($botMeta.get()[bot.name]?.hidden) {
+      continue
+    }
+
     // Toasts are opt-in: the unread badge is always set above, but the
     // per-message notification fires only when the user enabled it.
     if ($activityToasts.get()) {
@@ -152,13 +158,14 @@ function trackInboundActivity(roster) {
 /** Last good cron list, same idea as the roster snapshot. */
 const $lastJobs = atom([])
 
-/** User pref: hide canonical "Bot Chat" sessions from the global Sessions
- *  sidebar (they always remain in the Bots roster). Persisted via ctx.storage.
- *  Default ON — Bot Chats are plugin-owned forever-chats, not scratch sessions,
- *  so keeping them out of the shared recents list is the expected behavior.
- *  Backed by the core generic `hidden` session flag (session.create hidden:true
- *  / session.set_hidden); older gateways ignore it and Bot Chats stay visible. */
-const $hideBotChats = atom(true)
+// Bot Mode sessions are ALWAYS hidden from the global Sessions sidebar:
+// canonical Bot Chats are plugin-owned forever-chats and group-chat member
+// sessions are room plumbing — neither is a scratch conversation, and a
+// 6-member room would otherwise dump six identical "Group: ..." rows into
+// recents. Backed by the core generic `hidden` session flag (session.create
+// hidden:true / session.set_hidden); the Bots pane browses them via
+// session.list include_hidden. Older gateways ignore the flag and the
+// sessions simply stay visible there.
 
 /** Bot the Routines tile is scoped to. Follows the live gateway profile
  *  (the bot you're actually chatting with) and roster clicks. */
@@ -234,6 +241,12 @@ function groupChatSyncSnapshot(all = $groupChats.get()) {
 /** Debounced best-effort server mirror. Older gateways reject ui_meta and
  *  Desktop's local room remains authoritative, preserving compatibility. */
 function scheduleGroupChatServerSync(all = $groupChats.get()) {
+  // Browser shells provide timers; source-level VM tests and older embedded
+  // hosts may not. Room persistence must never break the surrounding gateway
+  // lifecycle when the optional mirror cannot be scheduled.
+  if (typeof setTimeout !== 'function') {
+    return
+  }
   if (groupChatSyncTimer !== null) {
     clearTimeout(groupChatSyncTimer)
   }
@@ -263,6 +276,10 @@ function handleSessionsGatewayTransition() {
   }
 
   $groupChats.set(rooms)
+  // Re-publish the bounded room mirror after reconnects or gateway swaps.
+  // Local plugin storage remains authoritative, so a transient failure here
+  // is harmless and the next gateway transition or room update retries it.
+  scheduleGroupChatServerSync(rooms)
 }
 
 /** Per-bot appearance + display meta, persisted via ctx.storage:
@@ -340,28 +357,144 @@ async function saveBotMeta(name, patch) {
   return { serverPersisted: serverOutcome === 'persisted', serverOutcome }
 }
 
-/** Flip the "hide Bot Chats from the sidebar" pref, persist it, and reconcile
- *  every known canonical chat via the core session.set_hidden RPC so the change
- *  applies to already-created Bot Chats (not just future ones). Feature-detected:
- *  older gateways lack session.set_hidden and simply keep the chats visible. */
-async function setHideBotChats(hidden) {
-  $hideBotChats.set(hidden)
+// ── hidden bots (right-click → Hide Bot) ────────────────────────────────────
+// Hiding is a ROSTER-DISPLAY concern only: a hidden bot keeps working —
+// @mentions still resolve, group-chat membership is untouched, its name
+// still counts as taken, and an open chat stays open. The flag lives in bot
+// meta (`hidden: true`), so it rides the same local-storage + server
+// ui_meta pipeline as pins/titles and follows the profile across machines.
+// Unhide writes `hidden: false` (never null): a null key survives the local
+// `{ ...prev, ...patch }` merge while the server DELETES None keys, and
+// that asymmetry lets mergeServerMeta resurrect a stale truthy copy. A
+// literal false round-trips identically through both stores.
 
-  try {
-    Promise.resolve(pluginCtx?.storage?.set?.('hide-bot-chats', hidden)).catch(() => undefined)
-  } catch {
-    /* storage unavailable — pref holds for this window only */
+/** Session-only view toggle: reveal hidden bots (dimmed) in the roster. */
+const $showHiddenBots = atom(false)
+
+/** Hidden flag for a roster row. Thin remote-source rows never read local
+ *  meta (botRosterMeta returns null for them), so hide is by NAME on the
+ *  active source; remote rows of the same name stay visible. */
+function isBotHidden(bot, metaByName) {
+  return Boolean(botRosterMeta(bot, metaByName)?.hidden)
+}
+
+/** Hiding the selected bot re-homes the selection (the Routines pane
+ *  follows it): first visible bot wins, then 'default' — unless default is
+ *  itself hidden with nothing else visible, in which case the selection
+ *  stays put rather than pointing somewhere even less real. */
+function fallbackSelectionAfterHide(name) {
+  if ($selectedBot.get() !== name) {
+    return
   }
 
   const meta = $botMeta.get()
-  const ids = Object.values(meta)
+  const visible = $lastRoster
+    .get()
+    .filter(bot => !bot.remoteSource && bot.name !== name && !meta[bot.name]?.hidden)
+
+  if (visible.length) {
+    $selectedBot.set(visible[0].name)
+    return
+  }
+
+  if (name !== 'default' && !meta.default?.hidden) {
+    $selectedBot.set('default')
+  }
+}
+
+/** One-time reconciliation: Bot Mode sessions are always hidden, but rooms
+ *  and Bot Chats created before this policy (or while the old pref was off)
+ *  left visible rows behind. On every plugin load, sweep every session id we
+ *  own — canonical chats from bot meta plus each group room's member
+ *  sessions — through the core session.set_hidden RPC, then run the
+ *  ownership-based sweep for the rows we DON'T know by id. Idempotent (the DB
+ *  setter is a no-op on already-hidden rows) and feature-detected: older
+ *  gateways lack session.set_hidden and simply keep the rows visible. */
+function hideOwnedBotSessions() {
+  const canonical = Object.values($botMeta.get())
     .map(m => m && m.chat)
     .filter(Boolean)
+  const rooms = Object.values($groupChats.get())
+    .flatMap(room => Object.values(room?.sessions || {}))
+    .filter(sid => Boolean(sid) && sid !== true)
+  const ids = [...new Set([...canonical, ...rooms])]
+
+  const known = Promise.all(
+    ids.map(sid =>
+      Promise.resolve(host.request('session.set_hidden', { session_id: sid, hidden: true })).catch(() => undefined)
+    )
+  )
+
+  return Promise.all([known, sweepBotProfileSessions().catch(() => undefined)])
+}
+
+// Titles Bot Mode itself mints for its plumbing sessions. Bot-to-bot CLI
+// handoffs (`hermes -p <bot> chat --in ~ -c "Bot Chat" --create-if-missing`)
+// and mention handoffs create sessions with EXACTLY these titles; the
+// "Group: " prefix is the member-session title ensureGroupChatSession has
+// used since group chats shipped. Exact/prefix matching is deliberate — a
+// user's real conversation inside a bot profile keeps whatever title the
+// user gave it and is never touched.
+const BOT_MODE_SWEEP_TITLES = new Set(['Bot Chat', 'Agent Inbox'])
+
+function isBotModeSweepTitle(title) {
+  const t = String(title || '').trim()
+  return BOT_MODE_SWEEP_TITLES.has(t) || t.startsWith('Group: ')
+}
+
+/** Ownership-based sweep: the id-based sweep above only covers sessions the
+ *  plugin recorded ($botMeta canonical chats, $groupChats member sids), but
+ *  Bot Mode sessions are ALSO minted outside the plugin — bot-to-bot CLI
+ *  handoffs ("Agent Inbox" / extra "Bot Chat" rows born visible in a bot's
+ *  profile) — and those ids the plugin never learns. So: enumerate each
+ *  roster bot's OWN profile sessions (only bot profiles — a non-bot profile
+ *  is never listed, so its sessions are never touched) and hide any VISIBLE
+ *  row whose title is Bot Mode plumbing. session.list without include_hidden
+ *  returns only visible rows, which keeps the sweep naturally idempotent.
+ *  Remote-source bots route to their own connection via requestForBot.
+ *  Feature-detected + fire-and-forget: older gateways without per-profile
+ *  session.list / session.set_hidden simply reject and the sweep no-ops. */
+async function sweepBotProfileSessions() {
+  const cached = $lastRoster.get()
+  let roster = Array.isArray(cached) && cached.length ? cached : null
+
+  if (!roster) {
+    // Plugin load can run before the Bots pane hydrates $lastRoster — fall
+    // back to the active gateway's own profile list (local bots; remote
+    // sources get covered by the next sweep once the roster cache exists).
+    try {
+      const res = await host.request('profiles.list', {})
+      roster = Array.isArray(res?.profiles) ? res.profiles : []
+    } catch {
+      return
+    }
+  }
 
   await Promise.all(
-    ids.map(sid =>
-      Promise.resolve(host.request('session.set_hidden', { session_id: sid, hidden })).catch(() => undefined)
-    )
+    roster.map(async bot => {
+      const name = String(bot?.name || '').trim()
+
+      if (!name) {
+        return
+      }
+
+      try {
+        const res = await requestForBot(bot, 'session.list', { profile: name, limit: PROFILE_SESSION_LIST_LIMIT })
+        const rows = Array.isArray(res?.sessions) ? res.sessions : []
+
+        await Promise.all(
+          rows
+            .filter(row => row && row.id && isBotModeSweepTitle(row.title))
+            .map(row =>
+              Promise.resolve(
+                requestForBot(bot, 'session.set_hidden', { session_id: row.id, hidden: true, profile: name })
+              ).catch(() => undefined)
+            )
+        )
+      } catch {
+        /* older gateway / unreachable source — leave this profile alone */
+      }
+    })
   )
 }
 
@@ -532,6 +665,18 @@ function mergeServerMeta(roster) {
         !Object.prototype.hasOwnProperty.call(server, 'chat')
       ) {
         delete merged.chat
+      }
+
+      // Canonical multi-group metadata is authoritative for the compatibility
+      // scalar too. A server-side `group: null` is represented by omission,
+      // so retaining the local scalar would resurrect a membership that another
+      // desktop just removed.
+      if (
+        Array.isArray(server.groups) &&
+        Object.prototype.hasOwnProperty.call(mine, 'group') &&
+        !Object.prototype.hasOwnProperty.call(server, 'group')
+      ) {
+        delete merged.group
       }
 
       if (JSON.stringify(next[bot.name] || null) !== JSON.stringify(merged)) {
@@ -1399,6 +1544,11 @@ function BotFace({ shape, color, image, size = 36, name = 'agent', mood = 'idle'
 
   const working = mood === 'work'
   const eyeFill = isDarkColor(color) ? 'rgba(232,220,195,0.95)' : 'rgba(0,0,0,0.85)'
+  // Catchlight contrast follows the pupil, not the body: dark pupils get the
+  // white sparkle, light (cream) pupils on dark bodies get a dark one — a
+  // white dot on a cream pupil is invisible, which read as "no eye dots" on
+  // maroon/ink/oxblood avatars.
+  const hlFill = isDarkColor(color) ? 'rgba(0,0,0,0.6)' : 'rgba(255,255,255,0.85)'
   const ring = sampleFaceRing(shape)
   const rest = facePose(working ? 'work' : 'idle', 0)
   // Shape-aware initial eye line — the cloud body sits lower, so its eyes
@@ -1429,8 +1579,8 @@ function BotFace({ shape, color, image, size = 36, name = 'agent', mood = 'idle'
         children: [
           jsx('ellipse', { 'data-hb-el': '1', cx: 15.4, cy: eyeY0, rx: 2.2, ry: working ? 2.6 : 2.3, fill: eyeFill }),
           jsx('ellipse', { 'data-hb-er': '1', cx: 24.6, cy: eyeY0, rx: 2.2, ry: working ? 2.6 : 2.3, fill: eyeFill }),
-          jsx('circle', { 'data-hb-hl-l': '1', cx: 14.8, cy: eyeY0 - 0.7, r: 0.65, fill: 'rgba(255,255,255,0.85)' }),
-          jsx('circle', { 'data-hb-hl-r': '1', cx: 24, cy: eyeY0 - 0.7, r: 0.65, fill: 'rgba(255,255,255,0.85)' })
+          jsx('circle', { 'data-hb-hl-l': '1', cx: 14.8, cy: eyeY0 - 0.7, r: 0.65, fill: hlFill }),
+          jsx('circle', { 'data-hb-hl-r': '1', cx: 24, cy: eyeY0 - 0.7, r: 0.65, fill: hlFill })
         ]
       }),
       jsx('path', {
@@ -1589,6 +1739,13 @@ function McpSetupButton({ profile, entry, onDone, ensureProfile }) {
   }
 
   const beginOAuth = async () => {
+    // A second click (retry, impatient double-click) must not orphan the
+    // previous poll interval — an overwritten pollRef leaks a 2s poller that
+    // runs until unmount and can flip phase from a stale OAuth session.
+    if (pollRef.current) {
+      clearInterval(pollRef.current)
+      pollRef.current = null
+    }
     setPhase('busy')
     setMessage('')
     const profile = await resolveProfile()
@@ -2261,6 +2418,21 @@ function PetTab({ image, onImage }) {
  *  Gates every SOUL.md protocol append below. */
 let serverInjectsProtocol = false
 
+/** Pins to resolve precisely on the next roster poll: {profile: chatId}.
+ *  The backend answers "what about THIS conversation" per entry
+ *  (preferred_session), so a row's preview can describe the same session its
+ *  click opens (hermes-agent#88200). Unknown params are ignored by older
+ *  gateways, which simply omit the field. */
+function preferredSessionIds(allMeta) {
+  const pins = {}
+  for (const [name, meta] of Object.entries(allMeta || {})) {
+    if (meta?.chat) {
+      pins[name] = meta.chat
+    }
+  }
+  return pins
+}
+
 function useRoster() {
   const activeConnectionId = useValue(host.state.connectionId)
 
@@ -2269,7 +2441,11 @@ function useRoster() {
     queryFn: async () => {
       // Rich rows (last_session, ui_meta, has_avatar) come from the ACTIVE
       // gateway's profiles.list — unchanged single-source behavior.
-      const local = await host.request('profiles.list', {})
+      const pins = preferredSessionIds($botMeta.get())
+      const local = await host.request(
+        'profiles.list',
+        Object.keys(pins).length ? { preferred_session_ids: pins } : {}
+      )
       // Newer backends inject the teammate-messaging protocol into every
       // session's system prompt (agent.bot_mode_protocol) — SOUL.md must not
       // carry a second copy. Older gateways lack the flag: keep appending.
@@ -2320,7 +2496,28 @@ function mergeMultiSourceRoster(local, union, activeConnectionId, previous = [])
   // This-device shadow of default.
   const liveProvided = arguments.length >= 3
   const liveId = String(activeConnectionId || '').trim()
-  const activeId = liveId || (liveProvided ? '' : String(union?.primaryConnectionId || '').trim())
+  let activeId = liveId || (liveProvided ? '' : String(union?.primaryConnectionId || '').trim())
+
+  // Migrated remote-primary windows can still expose a legacy remote
+  // descriptor without connectionId. That produces a null live id even
+  // though profiles.list is answering from the registry primary. Infer the
+  // primary only when its inventory matches the rich rows and the local
+  // inventory does not. A genuinely local window has a matching local row,
+  // so it keeps the null-is-local behavior used after clicking This device.
+  if (!activeId && liveProvided) {
+    const primaryId = String(union?.primaryConnectionId || '').trim()
+    const richNames = new Set(localProfiles.map(profile => String(profile?.name || '').trim()).filter(Boolean))
+    const localMatches = agents.some(
+      agent => agent?.connectionKind === 'local' && richNames.has(String(agent?.profile || '').trim())
+    )
+    const primaryMatches = agents.some(
+      agent => String(agent?.connectionId || '').trim() === primaryId && richNames.has(String(agent?.profile || '').trim())
+    )
+
+    if (!localMatches && primaryId && primaryMatches) {
+      activeId = primaryId
+    }
+  }
   const activeByName = new Map()
 
   // Treat the rich list as one row per active-source profile. Clone every
@@ -2538,12 +2735,109 @@ function resolveRosterMentions(text, roster, active = {}) {
   return mentioned
 }
 
-async function deliverRemoteRosterMentions(bots, userText) {
+const REMOTE_DM_TIMEOUT_MS = 180000
+const REMOTE_DM_POLL_MS = 2000
+
+/** The remote bot's canonical Bot Chat: pinned stored-id from its profile's
+ *  ui_meta first, then resume-by-title, then create. Mirrors
+ *  ensureGroupChatSession so DMs land in the ONE forever-chat instead of
+ *  minting a fresh "Bot Chat" per mention. */
+async function ensureRemoteCanonicalChat(route, profile) {
+  let pinned = null
+
+  try {
+    const listed = await host.requestProfile(route, 'profiles.list', {})
+    const owner = listed?.profiles?.find(p => p.name === profile)
+    pinned = owner?.ui_meta?.['hermes-bots']?.chat || null
+  } catch {
+    /* older remote gateway — title lookup below still works */
+  }
+
+  for (const target of [pinned, 'Bot Chat']) {
+    if (!target) {
+      continue
+    }
+
+    try {
+      const res = await host.requestProfile(route, 'session.resume', {
+        session_id: target,
+        profile,
+        omit_messages: true
+      })
+
+      if (res?.session_id) {
+        return { runtime: res.session_id, stored: res.session_key || pinned }
+      }
+    } catch {
+      /* fall through */
+    }
+  }
+
+  const created = await host.requestProfile(route, 'session.create', {
+    profile,
+    title: 'Bot Chat',
+    // Bot Mode sessions are always hidden from the global sidebar.
+    hidden: true
+  })
+
+  return { runtime: created?.session_id || null, stored: created?.stored_session_id || null }
+}
+
+/** Bounded reply poll on the recipient's session — same shape as a group
+ *  member turn: wait for a NEW assistant message after `before`, or time out. */
+async function pollRemoteDmReply(route, profile, sessionRef, before) {
+  const deadline = Date.now() + REMOTE_DM_TIMEOUT_MS
+
+  while (Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, REMOTE_DM_POLL_MS))
+
+    let state = null
+
+    try {
+      state = await host.requestProfile(route, 'session.resume', { session_id: sessionRef, profile })
+    } catch {
+      continue
+    }
+
+    const messages = Array.isArray(state?.messages) ? state.messages : []
+    const done = !state?.inflight && !state?.running
+
+    if (messages.length > before && done) {
+      for (let i = messages.length - 1; i >= 0; i--) {
+        const msg = messages[i]
+
+        if (msg?.role === 'assistant') {
+          const text = typeof msg.content === 'string'
+            ? msg.content
+            : Array.isArray(msg.content)
+              ? msg.content.map(p => (typeof p === 'string' ? p : p?.text || '')).join('')
+              : msg?.text || ''
+
+          return String(text).trim() || null
+        }
+      }
+
+      return null
+    }
+  }
+
+  return null
+}
+
+/** Deliver a user mention to bots on OTHER connections: into each bot's
+ *  canonical Bot Chat, with the standard sender-attribution prefix (so the
+ *  recipient's messaging protocol recognizes an agent-to-agent message), then
+ *  relay the reply back as a notification. Sequential and fire-and-forget
+ *  from the composer's perspective. */
+async function deliverRemoteRosterMentions(bots, userText, sender) {
   const text = String(userText || '').trim()
 
   if (!text || typeof host.requestProfile !== 'function') {
     return
   }
+
+  const senderName = String(sender?.name || 'the user').trim()
+  const senderHandle = String(sender?.handle || senderName).trim()
 
   for (const bot of bots) {
     const connectionId = String(bot?.connectionId || '').trim()
@@ -2553,30 +2847,55 @@ async function deliverRemoteRosterMentions(bots, userText) {
       continue
     }
 
-    try {
-      const created = await host.requestProfile(
-        { connectionId, profile, mode: 'remote', targetProfile: profile },
-        'session.create',
-        { profile, title: 'Bot Chat', hidden: true }
-      )
-      const sessionId = created?.session_id
+    const route = { connectionId, mode: 'remote', profile, targetProfile: profile }
+    const label = bot.connectionLabel || connectionId
 
-      if (!sessionId) {
+    try {
+      const { runtime, stored } = await ensureRemoteCanonicalChat(route, profile)
+
+      if (!runtime) {
         throw new Error('No remote session')
       }
 
-      await host.requestProfile(
-        { connectionId, profile, mode: 'remote', targetProfile: profile },
-        'prompt.submit',
-        { session_id: sessionId, text }
-      )
+      // Baseline before our submit, so the poll can spot the NEW reply.
+      let before = 0
+
+      try {
+        const pre = await host.requestProfile(route, 'session.resume', { session_id: stored || runtime, profile })
+        before = Array.isArray(pre?.messages) ? pre.messages.length : pre?.message_count || 0
+      } catch {
+        /* lazy session — zero messages */
+      }
+
+      // The delivery prefix is the recipient's cue that an agent (not its
+      // human) is talking — same contract as the local CLI handoff.
+      await host.requestProfile(route, 'prompt.submit', {
+        session_id: runtime,
+        text: `Message from \u{1F916} ${senderName} (@${senderHandle}): ${text}`
+      })
       host.notify?.({
         kind: 'info',
         title: displayName(bot),
-        message: `Messaged @${botHandle(profile, bot)} on ${bot.connectionLabel || connectionId} from this chat.`
+        message: `Messaged @${botHandle(profile, bot)} on ${label} — will relay the reply here.`
       })
+
+      const reply = await pollRemoteDmReply(route, profile, stored || runtime, before)
+
+      if (reply) {
+        host.notify?.({
+          kind: 'info',
+          title: `\u{1F916} ${displayName(bot)} (${label})`,
+          message: reply.slice(0, 500)
+        })
+      } else {
+        host.notify?.({
+          kind: 'info',
+          title: displayName(bot),
+          message: `No reply from @${botHandle(profile, bot)} yet — check its Bot Chat on ${label}.`
+        })
+      }
     } catch (error) {
-      host.notifyError?.(error, `Could not reach ${bot.connectionLabel || profile}`)
+      host.notifyError?.(error, `Could not reach ${label}`)
     }
   }
 }
@@ -2676,10 +2995,11 @@ function createCanonicalChat(name) {
     const res = await host.request('session.create', {
       profile: name,
       title: 'Bot Chat',
-      // Born hidden from the global sidebar when the pref is on. Core applies
-      // this via the generic `hidden` flag (deferred as pending_hidden until the
-      // row exists); older gateways ignore the unknown param and it stays visible.
-      ...($hideBotChats.get() ? { hidden: true } : {})
+      // Always born hidden from the global sidebar — Bot Mode sessions are
+      // plugin-owned. Core applies this via the generic `hidden` flag
+      // (deferred as pending_hidden until the row exists); older gateways
+      // ignore the unknown param and it stays visible.
+      hidden: true
     })
     const sid = res?.stored_session_id
     const runtime = res?.session_id
@@ -2711,12 +3031,9 @@ function createCanonicalChat(name) {
         if (!opened && sid && typeof host.openSession === 'function') {
           await host.openSession(sid, { profile: name })
         }
-      } catch (err) {
-        if (sid) {
-          saveBotMeta(name, { chat: null })
-        }
-
-        throw err
+      } catch {
+        // The chat already exists. Keep the pin so the next click
+        // opens it instead of making a second Bot Chat.
       }
     }
 
@@ -2728,49 +3045,94 @@ function createCanonicalChat(name) {
   return run
 }
 
-async function openBotCanonicalChat(name, pinned) {
-  let id = pinned
-
-  try {
-    const res = await host.request('session.list', { profile: name, limit: 100 })
-    const rows = res?.sessions ?? []
-
-    if (!id && rows.length) {
-      // A CLI/A2A exchange may have created the canonical Bot Chat before the
-      // desktop saved ui_meta.chat. Reuse its explicit title first; for older
-      // bot installs retain the documented grandfathering behavior and adopt
-      // the most recent existing session rather than minting another one.
-      id = rows.find(session => session.title === 'Bot Chat')?.id || rows[0].id
-      saveBotMeta(name, { chat: id })
+/** Open the bot's ONE forever chat and return the opened id (or the pin).
+ *
+ *  Identity rules (hermes-agent#88200 — the row must open the session its
+ *  preview describes):
+ *  - grandfather: no pin + existing history adopts the previewed session
+ *    (`history`, the roster's last_session for this bot) instead of minting
+ *    a new empty chat;
+ *  - a live pin is verified through the backend's precise preferred_session
+ *    resolver (hidden rows still resolve; compression lineages resolve to
+ *    the live tip) — never inferred from a paginated, hidden-excluding
+ *    session.list window, which misjudged real hidden pins as gone;
+ *  - transient lookup failures keep the pin: try the stored id as-is, and
+ *    only a rejected open enters recovery. */
+async function openBotCanonicalChat(name, pinned, history) {
+  if (!pinned) {
+    // Grandfather: adopt the conversation the row already previews.
+    const adoptId = history?.id
+    if (adoptId && typeof host.openSession === 'function') {
+      try {
+        await host.openSession(adoptId, { profile: name })
+        saveBotMeta(name, { chat: adoptId })
+        return adoptId
+      } catch {
+        // Adoption raced a vanishing session — fall through to creation.
+      }
     }
+    return createCanonicalChat(name)
+  }
 
-    if (!rows.length) {
+  // Precise verification. An older gateway ignores the unknown param and
+  // omits the key — that reads as a lookup failure below, NOT as a missing
+  // session, so legacy backends keep the try-as-is escape hatch.
+  let preferred
+  let lookupFailed = false
+  try {
+    const res = await host.request('profiles.list', {
+      include_sessions: true,
+      preferred_session_ids: { [name]: pinned }
+    })
+    const row = (res?.profiles ?? []).find(p => p.name === name)
+    preferred = row?.preferred_session
+    if (preferred === undefined) {
+      lookupFailed = true
+    }
+  } catch {
+    lookupFailed = true
+  }
+
+  if (lookupFailed) {
+    // Transient gateway state (or an older backend): the pin is innocent
+    // until proven guilty — try it as-is, and only a rejected open clears.
+    try {
+      await host.openSession(pinned, { profile: name })
+      return pinned
+    } catch {
       saveBotMeta(name, { chat: null })
       return createCanonicalChat(name)
     }
+  }
 
-    if (!rows.some(session => session.id === id)) {
-      id = rows[0].id
-      saveBotMeta(name, { chat: id })
-    }
-  } catch {
-    // Gateway hiccup — try the stored pin as-is. Without a pin we cannot
-    // safely discover a pre-existing canonical chat, so create one as the
-    // fallback rather than leaving the click inert.
-    if (!id) {
-      return createCanonicalChat(name)
+  if (preferred) {
+    try {
+      await host.openSession(preferred.resolved_id || preferred.id, { profile: name })
+      return pinned
+    } catch (error) {
+      // The precise lookup JUST confirmed this session exists, so a failed
+      // open is transient (reconnect, backend restart). Clearing the pin or
+      // minting a replacement here would fork the bot's forever-chat on
+      // every hiccup — report and keep everything as it is.
+      host.notifyError?.(error, `Could not open ${name}'s chat — try again`)
+      return pinned
     }
   }
 
-  try {
-    await host.openSession(id, { profile: name })
-    return id
-  } catch {
-    // A rejected resume means the pin is unusable even if list recovery was
-    // inconclusive. Clear it first so a failed replacement can be retried.
-    saveBotMeta(name, { chat: null })
-    return createCanonicalChat(name)
+  // Definitively gone (db reset, or the lineage was rewritten past
+  // recovery): re-anchor on the previewed session when there is one.
+  const recoveryId = history?.id
+  if (recoveryId && typeof host.openSession === 'function') {
+    try {
+      await host.openSession(recoveryId, { profile: name })
+      saveBotMeta(name, { chat: recoveryId })
+      return recoveryId
+    } catch {
+      // Fall through to a fresh chat.
+    }
   }
+  saveBotMeta(name, { chat: null })
+  return createCanonicalChat(name)
 }
 
 async function prepareBotSource(bot, pinnedChat) {
@@ -2823,6 +3185,13 @@ function displayName(bot, meta) {
     return meta.title.trim()
   }
 
+  // Core-profile display name (profile.yaml, set via `hermes profile rename
+  // default <name>` or the dashboard) — the CLI-level equivalent of a Bot
+  // Mode title. Rides the profiles.list row; presentation-only.
+  if (typeof bot?.display_name === 'string' && bot.display_name.trim()) {
+    return bot.display_name.trim()
+  }
+
   // The primary profile is literally named "default" — as a bot identity
   // that reads like nobody bothered. Present it as Hermes (the agent it is)
   // unless the user gives it a real title.
@@ -2865,48 +3234,133 @@ function slugify(value) {
     .slice(0, 64)
 }
 
-/** Partition an already-sorted roster into user-defined groups. Returns
- *  [{ group: null | name, bots }] — ungrouped bots first (no separator),
- *  then each group alphabetically (case-insensitive), preserving the
- *  roster's own ordering (pin + recency) within every section. Groups are
- *  a per-bot `group` string in bot meta, so they ride the existing
- *  ui_meta sync to every machine. Empty sections are dropped, so a group
- *  disappears when its last member leaves — no group registry to manage. */
-function groupRoster(roster, metaByName) {
-  const ungrouped = []
-  const byGroup = new Map()
+/** Flatten markdown syntax out of a one-line roster preview so rows read
+ *  like Discord's — no raw **bold**, `code`, > quotes, or [link](url)
+ *  characters in the preview line. */
+function stripPreviewMarkdown(text) {
+  return String(text || '')
+    .replace(/```[\s\S]*?```/g, ' ')
+    .replace(/`([^`\n]*)`/g, '$1')
+    .replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1')
+    .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
+    .replace(/(\*\*|__)(.*?)\1/g, '$2')
+    .replace(/(^|\s)[*_](\S(?:.*?\S)?)[*_](?=\s|$|[.,;:!?])/g, '$1$2')
+    .replace(/~~(.*?)~~/g, '$1')
+    .replace(/^\s{0,3}#{1,6}\s+/gm, '')
+    .replace(/^\s{0,3}>\s?/gm, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
 
-  for (const bot of roster) {
-    const group = (botRosterMeta(bot, metaByName)?.group || '').trim()
+/** Canonical multi-group read with legacy scalar compatibility. Profiles that
+ *  predate `groups` still fall back to `group`; once the canonical array exists,
+ *  it is authoritative. Writes keep `group` as a first-membership projection so
+ *  older desktops can still display one room without corrupting the array. */
+function botGroups(meta) {
+  const groups = []
+  const seen = new Set()
+  const values = Array.isArray(meta?.groups) ? meta.groups : [meta?.group]
 
-    if (!group) {
-      ungrouped.push(bot)
+  for (const value of values) {
+    if (typeof value !== 'string') {
       continue
     }
 
-    if (!byGroup.has(group)) {
-      byGroup.set(group, [])
+    const group = value.trim()
+
+    if (group && !seen.has(group)) {
+      seen.add(group)
+      groups.push(group)
     }
-    byGroup.get(group).push(bot)
   }
 
-  const sections = ungrouped.length ? [{ group: null, bots: ungrouped }] : []
-
-  for (const group of [...byGroup.keys()].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }))) {
-    sections.push({ group, bots: byGroup.get(group) })
-  }
-
-  return sections
+  return groups
 }
 
-/** Existing group names, alphabetical — feeds the Move-to-group dialog. */
+function groupMembershipPatch(meta, group, enabled) {
+  const name = String(group || '').trim()
+  let groups = botGroups(meta)
+
+  if (enabled) {
+    if (name && !groups.includes(name)) {
+      groups = [...groups, name]
+    }
+  } else {
+    groups = groups.filter(existing => existing !== name)
+  }
+
+  return { groups, group: groups[0] || null }
+}
+
+/** Group chats that should hold a roster row: every group named in bot meta
+ *  (local members) plus every room record that still has stored members or
+ *  log — cross-connection rooms whose members can't ride bot-meta. */
+function groupChatNames(metaByName, rooms) {
+  const names = new Set(knownGroups(metaByName))
+
+  for (const [name, room] of Object.entries(rooms || {})) {
+    if ((Array.isArray(room?.members) && room.members.length) || (Array.isArray(room?.log) && room.log.length)) {
+      names.add(name)
+    }
+  }
+
+  return [...names]
+}
+
+/** Millisecond timestamp of a room's newest log entry (0 for a silent room) —
+ *  the group's recency key, competing in the same ordering as bot rows. */
+function groupLastActivity(room) {
+  const log = Array.isArray(room?.log) ? room.log : []
+
+  return log.length ? log[log.length - 1].at || 0 : 0
+}
+
+/** Seat a group's member roster: local bots whose meta names the group, plus
+ *  the room record's stored descriptors (remote members can't ride bot-meta).
+ *  Prefers the LIVE roster row for a stored descriptor when present. */
+function groupChatMemberBots(group, roster, metaByName) {
+  const local = (roster || []).filter(
+    bot => !bot.remoteSource && botGroups(botRosterMeta(bot, metaByName)).includes(group)
+  )
+  const stored = ($groupChats.get()[group] || {}).members || []
+  const seated = new Set(local.map(botRosterKey))
+  const remote = []
+
+  for (const descriptor of stored) {
+    const key = botRosterKey(descriptor)
+
+    if (seated.has(key)) {
+      continue
+    }
+
+    seated.add(key)
+    remote.push((roster || []).find(bot => botRosterKey(bot) === key) || descriptor)
+  }
+
+  return [...local, ...remote]
+}
+
+/** Persist source-qualified identities for every selected member. The active
+ *  source's row may become remote after a connection switch, so retaining it
+ *  here is what keeps the same room intact across machines. */
+function durableGroupChatMembers(bots) {
+  return (bots || []).map(bot => ({
+    name: bot.name,
+    handle: bot.handle || bot.name,
+    connectionId: bot.connectionId,
+    connectionKind: bot.connectionKind,
+    connectionLabel: bot.connectionLabel,
+    remoteSource: true,
+    sourceScoped: true
+  }))
+}
+
+/** Existing group names, alphabetical — feeds the Manage-groups dialog. */
 function knownGroups(metaByName) {
   const names = new Set()
 
   for (const meta of Object.values(metaByName || {})) {
-    const group = (meta?.group || '').trim()
-
-    if (group) {
+    for (const group of botGroups(meta)) {
       names.add(group)
     }
   }
@@ -2957,7 +3411,7 @@ function parseGroupChatMentions(text, members) {
     // Cross-connection members are also addressable by their @name-device
     // handle (the roster's disambiguated form) — same-named agents on two
     // machines resolve to the right one.
-    const handle = String(member.handle || '').trim()
+    const handle = String(member.handle || botHandle(member.name, member) || '').trim()
     const forms = new Set([
       member.name.toLowerCase(),
       member.name.toLowerCase().replace(/[\s_-]+/g, ''),
@@ -3043,6 +3497,13 @@ function rotateGroupSpeakers(members, round) {
   return [...members.slice(shift), ...members.slice(0, shift)]
 }
 
+/** Transcript form of a room speaker's profile name. The primary profile is
+ *  literally named "default" — render it as Hermes (matching displayName and
+ *  the @hermes handle) so the main agent never loses its name in rooms. */
+function groupSpeakerLabel(name) {
+  return (name || '').trim().toLowerCase() === 'default' ? 'Hermes' : name
+}
+
 /** Room-log line as a member sees it: `Name (user): …` / `Name: …` /
  *  `Name (you): …`. */
 function formatGroupChatLine(entry, viewerName) {
@@ -3055,7 +3516,7 @@ function formatGroupChatLine(entry, viewerName) {
   // two machines stay tellable apart in every member's transcript.
   const source = entry.from.source ? ` [${entry.from.source}]` : ''
 
-  return `${entry.from.name}${suffix}${source}: ${entry.text}`
+  return `${groupSpeakerLabel(entry.from.name)}${suffix}${source}: ${entry.text}`
 }
 
 /** The full per-turn payload for one member: participation rules + the room
@@ -3066,19 +3527,19 @@ function buildGroupChatTurnPrompt({ groupName, members, viewer, deltaLines }) {
   const peers = members.filter(m => groupMemberKey(m) !== viewerKey)
   const peerNames = peers
     .map(m => {
-      const handle = m.title ? `${m.title} (@${m.name})` : `@${m.name}`
+      const handle = m.title ? `${m.title} (@${botHandle(m.name, m)})` : `@${botHandle(m.name, m)}`
       return m.remoteSource ? `${handle} [on ${m.connectionLabel || m.connectionId}]` : handle
     })
     .join(', ')
 
   return [
-    `[Group chat: "${groupName}"] You are @${viewer.name}, one participant in a group chat with ${peerNames || 'no one else yet'} and the user.`,
+    `[Group chat: "${groupName}"] You are @${botHandle(viewer.name, viewer)}, one participant in a group chat with ${peerNames || 'no one else yet'} and the user.`,
     '',
     'New messages in the room since your last turn (oldest first):',
     ...deltaLines.map(line => `  ${line}`),
     '',
     'Rules for this room:',
-    '- Reply with ONE short conversational message (1-3 sentences) ONLY if you have something new worth adding: build on what was just said, claim or hand off work, answer a question aimed at you, or report a real result.',
+    '- Reply with ONE conversational message ONLY if you have something new worth adding: build on what was just said, claim or hand off work, answer a question aimed at you, or report a real result. Keep chatter short (1-3 sentences) — but when you are delivering a result, an answer the user asked for, or substantive work, give it at full quality and length; never thin out real content to fit the room.',
     '- If you have nothing new to add, reply with exactly "(pass)". Passing is good — it lets the conversation settle.',
     '- Mention a teammate as @name to pull them in; mention @user only for a judgment call or a result the user needs. Do not repeat points already made.',
     '- Never reveal content from your private 1:1 chats. Your reply text goes to the room verbatim — no preamble, no meta-commentary.'
@@ -3122,8 +3583,12 @@ function updateGroupChat(group, mutate) {
         log: room.log,
         watermarks: room.watermarks,
         sessions: room.sessions || {},
-        // Cross-connection member descriptors — remote bots can't ride
-        // bot-meta, so the room record carries who they are.
+        // Timed-out turns awaiting a late reply — keyed by member, valued
+        // with the pre-turn message baseline. Survives reloads so finished
+        // work is still harvested after a window restart.
+        stranded: room.stranded || {},
+        // Source-qualified member descriptors keep the room whole when the
+        // active connection changes and today's local members become remote.
         members: Array.isArray(room.members) ? room.members : []
       }
     }
@@ -3137,13 +3602,12 @@ function updateGroupChat(group, mutate) {
   return next
 }
 
-/** Soft-disband a group chat: clear every member's group assignment (the
- *  grouping is bot-meta, so the disband syncs cross-machine via ui_meta),
- *  drop the room log from the atom + plugin storage, and close the room view
- *  if it's open. The members' per-group gateway sessions ("Group: <name>")
- *  are intentionally KEPT — they stay reachable through each bot's session
- *  browser. */
-async function disbandGroupChat(group, memberNames) {
+/** Soft-disband a group chat: remove only this group from every local member's
+ *  membership list (the metadata syncs cross-machine via ui_meta), drop the
+ *  room log from the atom + plugin storage, and close the room view if it's
+ *  open. Other group memberships and the members' per-group gateway sessions
+ *  ("Group: <name>") are intentionally KEPT. */
+async function disbandGroupChat(group, members) {
   // Invalidate any in-flight round-robin FIRST: bump the epoch so a running
   // drive bails at its next member boundary instead of appending to a room
   // the user just discarded.
@@ -3163,6 +3627,9 @@ async function disbandGroupChat(group, memberNames) {
     $groupChatWorkspace.set(null)
   }
 
+  // Retire the room's MAIN-window tab too (host.openWorkspace path).
+  closeGroupChatMainTab(group)
+
   const needs = { ...$groupNeedsYou.get() }
 
   delete needs[group]
@@ -3175,7 +3642,12 @@ async function disbandGroupChat(group, memberNames) {
 
     for (const [name, room] of Object.entries($groupChats.get())) {
       if (name !== group && Array.isArray(room.log)) {
-        durable[name] = { log: room.log, watermarks: room.watermarks, sessions: room.sessions || {} }
+        durable[name] = {
+          log: room.log,
+          watermarks: room.watermarks,
+          sessions: room.sessions || {},
+          members: Array.isArray(room.members) ? room.members : []
+        }
       }
     }
 
@@ -3185,16 +3657,21 @@ async function disbandGroupChat(group, memberNames) {
   }
   scheduleGroupChatServerSync($groupChats.get())
 
-  // Ungroup the members last. saveBotMeta never throws (local storage +
+  // Remove this membership last. saveBotMeta never throws (local storage +
   // best-effort profiles.configure per member), so a flaky gateway can't
   // strand the disband halfway with the room log already gone.
-  for (const name of memberNames) {
-    await saveBotMeta(name, { group: null })
+  for (const member of members) {
+    if (!member?.name || member.remoteSource) {
+      continue
+    }
+
+    const meta = $botMeta.get()[member.name] || {}
+    await saveBotMeta(member.name, groupMembershipPatch(meta, group, false))
   }
 }
 
-function appendGroupChatEntry(group, from, text) {
-  const entry = { from, text: String(text).trim(), at: Date.now() }
+function appendGroupChatEntry(group, from, text, thread) {
+  const entry = { at: Date.now(), from, text: String(text).trim(), thread: thread || 'legacy' }
 
   updateGroupChat(group, room => {
     room.log.push(entry)
@@ -3245,7 +3722,8 @@ async function ensureGroupChatSession(group, member) {
   const created = await requestForBot(member, 'session.create', {
     profile: member.name,
     title,
-    ...($hideBotChats.get() ? { hidden: true } : {})
+    // Room member sessions are plumbing — always hidden from the sidebar.
+    hidden: true
   })
   const stored = created?.stored_session_id || null
 
@@ -3261,11 +3739,21 @@ async function ensureGroupChatSession(group, member) {
 
 const GROUP_TURN_TIMEOUT_MS = 180000
 const GROUP_TURN_POLL_MS = 2000
+// A member turn that is VISIBLY still working (session reports
+// inflight/running) keeps its slot alive up to this hard cap. The base
+// timeout alone silently dropped long real turns: a 7-minute research run
+// timed out at 3 minutes, read as a pass, and its finished result never
+// reached the room (db's Aug 2026 report).
+const GROUP_TURN_HARD_CAP_MS = 20 * 60000
 
 /** One member turn, gateway-native: submit the room delta as a prompt into
  *  the member's per-group session, then poll the session until a NEW
- *  assistant message lands (or timeout → pass). No shell composition. */
-async function runGroupChatMemberTurn(group, member, prompt) {
+ *  assistant message lands (or timeout → pass). While the session visibly
+ *  reports work in flight the deadline extends (bounded by the hard cap),
+ *  so slow models aren't cut off mid-run. A turn that still times out
+ *  records a stranded marker so the finished reply can be harvested into
+ *  the room at the member's next turn instead of being lost. */
+async function runGroupChatMemberTurn(group, member, prompt, thread) {
   const { runtime, stored } = await ensureGroupChatSession(group, member)
 
   if (!runtime) {
@@ -3287,7 +3775,8 @@ async function runGroupChatMemberTurn(group, member, prompt) {
 
   await requestForBot(member, 'prompt.submit', { session_id: runtime, text: prompt })
 
-  const deadline = Date.now() + GROUP_TURN_TIMEOUT_MS
+  const started = Date.now()
+  let deadline = started + GROUP_TURN_TIMEOUT_MS
 
   while (Date.now() < deadline) {
     await new Promise(resolve => setTimeout(resolve, GROUP_TURN_POLL_MS))
@@ -3304,7 +3793,8 @@ async function runGroupChatMemberTurn(group, member, prompt) {
     }
 
     const messages = Array.isArray(state?.messages) ? state.messages : []
-    const done = !state?.inflight && !state?.running
+    const busy = Boolean(state?.inflight || state?.running)
+    const done = !busy
 
     if (messages.length > before && done) {
       for (let i = messages.length - 1; i >= 0; i--) {
@@ -3323,22 +3813,122 @@ async function runGroupChatMemberTurn(group, member, prompt) {
 
       return null
     }
+
+    // Still visibly working: extend the deadline (never past the hard cap).
+    if (busy) {
+      deadline = Math.min(started + GROUP_TURN_HARD_CAP_MS, Math.max(deadline, Date.now() + GROUP_TURN_TIMEOUT_MS))
+    }
   }
 
-  return null // timeout — reads as a pass
+  // Timeout — reads as a pass, but remember the baseline + thread
+  // (runtime-only) so the finished reply can be posted late into the RIGHT
+  // thread instead of vanishing.
+  updateGroupChat(group, r => {
+    r.stranded = { ...(r.stranded || {}), [groupMemberKey(member)]: { before, thread } }
+    return r
+  })
+
+  return null
 }
 
-/** Drive one bounded round-robin room turn. Serial — one member at a time.
- *  A newer user send bumps the room epoch; this loop notices at the next
- *  member boundary, bails, and the newest send's own loop takes over. */
-async function runGroupChatRounds(group, members) {
+/** Post a timed-out member's finished reply into the room, if it landed
+ *  after we stopped waiting. Called at the member's next turn boundary and
+ *  on user sends, so long-running work is delivered late rather than lost. */
+async function harvestStrandedGroupReply(group, member) {
+  const memberKey = groupMemberKey(member)
+  const room = $groupChats.get()[group] || {}
+  const marker = room.stranded?.[memberKey]
+  // Markers were a bare number before threads; normalize both shapes.
+  const strandedBefore = typeof marker === 'number' ? marker : marker?.before
+  const strandedThread = (typeof marker === 'object' && marker?.thread) || 'legacy'
+
+  if (typeof strandedBefore !== 'number') {
+    return
+  }
+
+  let state = null
+
+  try {
+    const stored = room.sessions?.[memberKey]
+    state = await requestForBot(member, 'session.resume', {
+      session_id: stored || `Group: ${group}`,
+      profile: member.name
+    })
+  } catch {
+    return // source unreachable — leave the marker for the next boundary
+  }
+
+  if (state?.inflight || state?.running) {
+    return // still grinding — keep waiting
+  }
+
+  // Done (or dead): the marker is consumed either way.
+  updateGroupChat(group, r => {
+    const next = { ...(r.stranded || {}) }
+    delete next[memberKey]
+    r.stranded = next
+    return r
+  })
+
+  const messages = Array.isArray(state?.messages) ? state.messages : []
+
+  if (messages.length <= strandedBefore) {
+    return
+  }
+
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i]
+
+    if (msg?.role === 'assistant') {
+      const text = typeof msg.content === 'string'
+        ? msg.content
+        : Array.isArray(msg.content)
+          ? msg.content.map(p => (typeof p === 'string' ? p : p?.text || '')).join('')
+          : msg?.text || ''
+      const reply = String(text).trim()
+
+      if (reply && !isGroupPassText(reply)) {
+        appendGroupChatEntry(
+          group,
+          { kind: 'member', name: member.name, ...(member.remoteSource ? { source: member.connectionLabel || member.connectionId } : {}) },
+          reply,
+          strandedThread
+        )
+        updateGroupChat(group, r => {
+          r.watermarks[`${strandedThread}::${memberKey}`] = r.log.length
+          return r
+        })
+      }
+
+      return
+    }
+  }
+}
+
+/** Drive one bounded round-robin turn for ONE THREAD. Serial — one member at
+ *  a time. A newer user send bumps the room epoch; this loop notices at the
+ *  next member boundary, bails, and the newest send's own loop takes over.
+ *  Watermarks are per thread+member (`${thread}::${memberKey}`), so parallel
+ *  topics never eat each other's deltas. */
+async function runGroupChatRounds(group, members, thread) {
   const startEpoch = ($groupChats.get()[group] || {}).epoch || 0
   const isCurrent = () => (($groupChats.get()[group] || {}).epoch || 0) === startEpoch
   let posted = 0
 
   try {
     for (let round = 0; round < GROUP_CHAT_MAX_ROUNDS; round++) {
-      const roomLog = ($groupChats.get()[group] || {}).log || []
+      // Deliver any replies that finished after their turn timed out —
+      // every member, not just this round's responders, so long work is
+      // late, never lost.
+      for (const member of members) {
+        if (!isCurrent()) {
+          return
+        }
+
+        await harvestStrandedGroupReply(group, member)
+      }
+
+      const roomLog = (($groupChats.get()[group] || {}).log || []).filter(e => groupThreadOf(e) === thread)
       const responders = rotateGroupSpeakers(resolveGroupResponders(roomLog, members), round)
       let spokeThisRound = 0
 
@@ -3349,8 +3939,11 @@ async function runGroupChatRounds(group, members) {
 
         const room = $groupChats.get()[group] || { log: [], watermarks: {} }
         const memberKey = groupMemberKey(member)
-        const seen = room.watermarks[memberKey] || 0
-        const delta = room.log.slice(seen)
+        const markKey = `${thread}::${memberKey}`
+        const seen = room.watermarks[markKey] || 0
+        // Delta: NEW room entries, narrowed to this thread — the member's
+        // turn sees only the conversation it's part of.
+        const delta = room.log.slice(seen).filter(e => groupThreadOf(e) === thread)
 
         if (!delta.length) {
           continue
@@ -3363,17 +3956,25 @@ async function runGroupChatRounds(group, members) {
           deltaLines: delta.slice(-GROUP_CHAT_HISTORY_LIMIT).map(e => formatGroupChatLine(e, member.name))
         })
 
+        // Surface WHO is on turn (runtime-only, like running/epoch) so the
+        // room shows "Radar is thinking…" instead of a generic working line —
+        // long model turns otherwise read as the room being stuck.
+        updateGroupChat(group, r => {
+          r.turn = member.name
+          return r
+        })
+
         let reply = null
 
         try {
-          reply = await runGroupChatMemberTurn(group, member, prompt)
+          reply = await runGroupChatMemberTurn(group, member, prompt, thread)
         } catch {
           reply = null // a failed turn is a pass, never a room error
         }
 
         // The member has now seen everything up to the pre-reply log length.
         updateGroupChat(group, r => {
-          r.watermarks[memberKey] = r.log.length
+          r.watermarks[markKey] = r.log.length
           return r
         })
 
@@ -3381,11 +3982,12 @@ async function runGroupChatRounds(group, members) {
           appendGroupChatEntry(
             group,
             { kind: 'member', name: member.name, ...(member.remoteSource ? { source: member.connectionLabel || member.connectionId } : {}) },
-            reply
+            reply,
+            thread
           )
           // Its own message counts as seen too.
           updateGroupChat(group, r => {
-            r.watermarks[memberKey] = r.log.length
+            r.watermarks[markKey] = r.log.length
             return r
           })
           posted += 1
@@ -3401,24 +4003,36 @@ async function runGroupChatRounds(group, members) {
     if (isCurrent()) {
       updateGroupChat(group, r => {
         r.running = false
+        r.turn = null
         return r
       })
     }
   }
 }
 
-/** User send into a group room: append, bump epoch (supersedes any running
- *  loop at its next member boundary), and start the room turn unless one is
- *  already running under the new epoch semantics. */
-function sendToGroupChat(group, members, text) {
+/** User send into a group room. `thread` continues that thread (its reply
+ *  box); omitted/null mints a NEW thread — the main composer's Slack shape.
+ *  Appends, bumps the room epoch (supersedes any running loop at its next
+ *  member boundary), and starts the turn drive for the target thread.
+ *  Returns the thread id the message landed in. */
+function sendToGroupChat(group, members, text, thread) {
   const trimmed = String(text || '').trim()
 
   if (!trimmed || !members.length) {
-    return
+    return null
   }
 
+  const target = thread || mintGroupThreadId()
+
   $groupNeedsYou.set({ ...$groupNeedsYou.get(), [group]: false })
-  appendGroupChatEntry(group, { kind: 'user', name: 'You' }, trimmed)
+  // Refresh the durable room roster on every send. This backfills rooms made
+  // by older Desktop builds and keeps the gateway mirror complete even when
+  // members overlap across multiple groups.
+  updateGroupChat(group, room => {
+    room.members = durableGroupChatMembers(members)
+    return room
+  })
+  appendGroupChatEntry(group, { kind: 'user', name: 'You' }, trimmed, target)
 
   const wasRunning = ($groupChats.get()[group] || {}).running === true
 
@@ -3429,7 +4043,7 @@ function sendToGroupChat(group, members, text) {
   })
 
   if (!wasRunning) {
-    void runGroupChatRounds(group, members).catch(() => {
+    void runGroupChatRounds(group, members, target).catch(() => {
       updateGroupChat(group, r => {
         r.running = false
         return r
@@ -3439,7 +4053,7 @@ function sendToGroupChat(group, members, text) {
     // A loop is live; it bails at its next boundary. Chain the fresh loop
     // after a short settle so exactly one drive owns the room.
     setTimeout(() => {
-      void runGroupChatRounds(group, members).catch(() => {
+      void runGroupChatRounds(group, members, target).catch(() => {
         updateGroupChat(group, r => {
           r.running = false
           return r
@@ -3447,6 +4061,8 @@ function sendToGroupChat(group, members, text) {
       })
     }, 250)
   }
+
+  return target
 }
 
 /** Share one in-flight async operation across concurrent callers. Failures
@@ -3679,6 +4295,7 @@ function activeBots(roster, activeProfile, gatewayState, now = Date.now()) {
 function BotRow({ bot, onDelete, onEdit, onGroup }) {
   const activeProfile = useValue(host.state.profile)
   const meta = botRosterMeta(bot, useValue($botMeta))
+  const groups = botGroups(meta)
   const last = bot.last_session
   const isActive = !bot.remoteSource && bot.name === activeProfile
   const { shape, color, image } = botAppearance(bot.name, meta)
@@ -3696,11 +4313,18 @@ function BotRow({ bot, onDelete, onEdit, onGroup }) {
   const unread = !bot.remoteSource && Boolean(unreadByName[bot.name])
   // WHO sent the last message (bot-to-bot DM vs human) — the full stored
   // history lives in the Sessions workspace (context menu), not inline.
-  const { fromBot } = previewKind(last?.preview)
+  // Preview identity must match click identity (#88200): when the backend
+  // resolved the pinned canonical chat, preview THAT session — not the
+  // profile's most recent (but unrelated) activity. Liveness checks above
+  // keep last_session semantics: any recent activity means the bot is alive.
+  const previewSession = bot.preferred_session || last
+  const { fromBot } = previewKind(previewSession?.preview)
   // DM previews read like DMs: strip the delivery prefix, keep the message.
-  const displayPreview = fromBot
-    ? (last?.preview || '').replace(A2A_PREFIX_RE, '').trim() || '…'
-    : last?.preview || bot.description || 'No conversations yet — say hi'
+  const displayPreview = stripPreviewMarkdown(
+    fromBot
+      ? (previewSession?.preview || '').replace(A2A_PREFIX_RE, '').trim() || '…'
+      : previewSession?.preview || bot.description || 'No conversations yet — say hi'
+  )
 
   const warm = () => {
     // Multi-source row: pre-dial the agent's OWN source (feature-detected).
@@ -3758,7 +4382,7 @@ function BotRow({ bot, onDelete, onEdit, onGroup }) {
     }
 
     try {
-      const id = await openBotCanonicalChat(bot.name, pinnedChat)
+      const id = await openBotCanonicalChat(bot.name, pinnedChat, bot.last_session)
 
       if (id) {
         return
@@ -3782,7 +4406,10 @@ function BotRow({ bot, onDelete, onEdit, onGroup }) {
     className: cn(
       'flex w-full min-w-0 max-w-full items-center gap-2.5 overflow-hidden rounded-md px-2 py-2 text-left transition-colors',
       'hover:bg-(--chrome-action-hover)',
-      isActive && 'bg-(--chrome-action-hover)'
+      isActive && 'bg-(--chrome-action-hover)',
+      // Hidden bots only render while the header eye toggle is on — dimmed,
+      // so the temporary reveal reads as a different state from the roster.
+      meta?.hidden && 'opacity-60'
     ),
     children: [
       jsx('div', {
@@ -3803,6 +4430,13 @@ function BotRow({ bot, onDelete, onEdit, onGroup }) {
                         className: 'shrink-0 text-[0.6875rem] text-(--ui-text-quaternary)',
                         title: 'Pinned',
                         children: '📌'
+                      })
+                    : null,
+                  meta?.hidden
+                    ? jsx(Codicon, {
+                        name: 'eye-closed',
+                        className: 'shrink-0 text-[0.6875rem] text-(--ui-text-quaternary)',
+                        title: 'Hidden from the roster'
                       })
                     : null,
                   jsx('span', {
@@ -3893,16 +4527,38 @@ function BotRow({ bot, onDelete, onEdit, onGroup }) {
             },
             children: meta?.pinned ? 'Unpin' : 'Pin to top'
           }),
+          jsx(ContextMenuItem, {
+            onSelect: () => {
+              const hidden = Boolean($botMeta.get()[bot.name]?.hidden)
+              // `hidden: false` (not null) so unhide round-trips through the
+              // server ui_meta merge the same way the local merge sees it.
+              saveBotMeta(bot.name, { hidden: !hidden })
+
+              if (!hidden) {
+                fallbackSelectionAfterHide(bot.name)
+              }
+
+              host.notify({
+                kind: 'info',
+                message: hidden
+                  ? `${displayName(bot, meta)} is back in the roster`
+                  : `${displayName(bot, meta)} hidden — use the eye button in the Bots header to see hidden bots`
+              })
+            },
+            children: meta?.hidden ? 'Unhide Bot' : 'Hide Bot'
+          }),
           jsx(ContextMenuSeparator, {}),
           jsx(ContextMenuItem, {
             onSelect: () => openBotSessionsWorkspace(bot),
             children: 'Sessions'
           }),
           jsx(ContextMenuItem, { onSelect: () => onEdit(bot), children: 'Edit Profile' }),
-          jsx(ContextMenuItem, {
-            onSelect: () => onGroup(bot),
-            children: meta?.group ? `Group: ${meta.group}…` : 'Move to group…'
-          }),
+          !bot.remoteSource
+            ? jsx(ContextMenuItem, {
+                onSelect: () => onGroup(bot),
+                children: groups.length ? `Groups: ${groups.join(', ')}…` : 'Manage groups…'
+              })
+            : null,
           jsx(ContextMenuItem, {
             onSelect: () => {
               host.notify({ kind: 'info', message: `Duplicating ${displayName(bot, meta)}…` })
@@ -5875,11 +6531,30 @@ async function invalidateRoutineOwner(profile) {
 function selectRoutineJobs(data, error, lastJobs, bot) {
   const live = Array.isArray(data?.jobs) ? data.jobs : null
   const all = live ?? (error ? lastJobs : [])
+  const scopedToBot = normalizedProfileName(data?.scoped) === normalizedProfileName(bot)
   return {
     live,
     all,
-    jobs: all.filter(job => routineBot(job) === bot)
+    jobs: scopedToBot ? all : all.filter(job => (routineBot(job) || 'default') === bot)
   }
+}
+
+/**
+ * Why the Routines pane can be empty while the bot's cron store has jobs.
+ *
+ * On older gateways the pane only shows jobs namespaced `[bot:<name>]` for the
+ * active bot (plus untagged legacy jobs on the default bot). When jobs exist in
+ * the store but none surface for this bot, the user is left staring at the
+ * generic empty state with no hint that cronjobs are present but hidden.
+ * Return a short explanation string in that case, or null when the store is
+ * genuinely empty (or the active bot's jobs are already shown).
+ */
+function routineFilterHint(all, jobs) {
+  if (jobs.length !== 0 || !Array.isArray(all) || all.length === 0) {
+    return null
+  }
+  return 'Cronjobs exist in this profile but none are tagged for this bot. ' +
+    'Name a job "[bot:<name>] …" to show it here, or see them in Cron below.'
 }
 
 function normalizedProfileName(profile) {
@@ -6427,6 +7102,7 @@ function RoutinesPane() {
   const staleNotice = error && !view.live && view.all.length
     ? 'Could not refresh cronjobs. Showing the last list we had.'
     : null
+  const filterHint = routineFilterHint(view.all, jobs)
 
   return jsxs('div', {
     className: 'flex h-full flex-col',
@@ -6504,16 +7180,21 @@ function RoutinesPane() {
           ? jsxs('div', {
               className: 'flex flex-1 flex-col items-center justify-center gap-3 px-4 text-center',
               children: [
-                jsx(Codicon, { name: 'calendar', className: 'text-[1.6rem] text-(--ui-text-quaternary)' }),
-                jsx('div', {
-                  className: 'text-xs leading-5 text-(--ui-text-tertiary)',
-                  children: 'Cronjobs are recurring tasks this agent runs on a schedule.'
-                }),
+                // No generic placeholder here: an icon + "cronjobs are…" blurb and the
+                // create button both just said "empty" (Teknium, Aug 2026). The hint
+                // text stays only when jobs exist but are hidden by the bot filter —
+                // that carries real information, not an empty-state marker.
+                filterHint
+                  ? jsx('div', {
+                      className: 'text-xs leading-5 text-(--ui-text-tertiary)',
+                      children: filterHint
+                    })
+                  : null,
                 jsx(Button, {
                   variant: 'secondary',
                   size: 'sm',
                   onClick: openCreate,
-                  children: 'Create Cronjob'
+                  children: filterHint ? 'Create a cronjob for this bot' : 'Create Cronjob'
                 })
               ]
             })
@@ -6525,14 +7206,15 @@ function RoutinesPane() {
               })
             }),
       jsx(CreateRoutineDialog, {
-        key: createTarget,
         bot: createTarget,
         open: createOpen,
         onClose: () => {
           setCreateOpen(false)
           setCreateOwner(null)
         }
-      })
+        // key is the jsx() THIRD argument — as a prop it is silently ignored
+        // and the dialog kept stale per-bot form state when the target changed.
+      }, createTarget)
     ]
   })
 }
@@ -6560,7 +7242,9 @@ function useProfileSessions(botName, gatewayGeneration) {
   return useQuery({
     queryKey: [ID, 'profile-sessions', botName, gatewayGeneration],
     enabled: Boolean(botName),
-    queryFn: () => host.request('session.list', { profile: botName, limit: PROFILE_SESSION_LIST_LIMIT }),
+    // include_hidden: this browser exists precisely to see the profile's own
+    // (always-hidden) Bot Mode sessions alongside its regular ones.
+    queryFn: () => host.request('session.list', { profile: botName, limit: PROFILE_SESSION_LIST_LIMIT, include_hidden: true }),
     refetchInterval: 8000,
     staleTime: 4000,
     retry: false
@@ -6740,24 +7424,23 @@ function ActiveNowStrip({ roster, activeProfile, gatewayState, metaByName, onOpe
   })
 }
 
-/** Assign a bot to a group (or clear it). Existing groups are one-click;
- *  the input creates a new one. The group is a bot-meta field, so it syncs
- *  cross-machine via ui_meta like pin/title. */
+/** Assign a bot to a group-chat membership without replacing its others.
+ *  Existing groups are independent toggles; the input creates and joins a new
+ *  one. Canonical groups + the legacy scalar projection ride ui_meta. */
 function GroupDialog({ bot, onClose }) {
   const meta = useValue($botMeta)
   const [name, setName] = useState('')
-  const current = (meta[bot?.name]?.group || '').trim()
+  const current = botGroups(meta[bot?.name])
   const groups = knownGroups(meta)
 
-  const assign = group => {
-    saveBotMeta(bot.name, { group: group || null })
+  const setMembership = (group, enabled) => {
+    saveBotMeta(bot.name, groupMembershipPatch(meta[bot.name], group, enabled))
     host.notify({
       kind: 'info',
-      message: group
-        ? `${displayName(bot, meta[bot.name])} moved to “${group}”`
-        : `${displayName(bot, meta[bot.name])} removed from its group`
+      message: enabled
+        ? `${displayName(bot, meta[bot.name])} added to “${group}”`
+        : `${displayName(bot, meta[bot.name])} removed from “${group}”`
     })
-    onClose()
   }
 
   return jsx(Dialog, {
@@ -6772,23 +7455,34 @@ function GroupDialog({ bot, onClose }) {
       children: [
         jsxs(DialogHeader, {
           children: [
-            jsx(DialogTitle, { children: 'Move to group' }),
+            jsx(DialogTitle, { children: 'Manage groups' }),
             jsx(DialogDescription, {
-              children: 'Groups render as labeled sections in the Bots roster and sync to every machine.'
+              children: 'A bot can join multiple group chats. Memberships sync to every machine.'
             })
           ]
         }),
         groups.length
           ? jsx('div', {
-              className: 'flex flex-wrap gap-1.5',
-              children: groups.map(group =>
-                jsx(Button, {
-                  variant: group === current ? 'default' : 'secondary',
-                  size: 'sm',
-                  onClick: () => assign(group),
-                  children: group
-                }, group)
-              )
+              className: 'grid gap-1.5',
+              children: groups.map(group => {
+                const enabled = current.includes(group)
+
+                return jsxs(
+                  'label',
+                  {
+                    className:
+                      'flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-sm hover:bg-(--chrome-action-hover)',
+                    children: [
+                      jsx(Checkbox, {
+                        checked: enabled,
+                        onCheckedChange: checked => setMembership(group, checked === true)
+                      }),
+                      jsx('span', { children: group })
+                    ]
+                  },
+                  group
+                )
+              })
             })
           : null,
         jsxs('form', {
@@ -6798,7 +7492,8 @@ function GroupDialog({ bot, onClose }) {
             const trimmed = name.trim()
 
             if (trimmed) {
-              assign(trimmed)
+              setMembership(trimmed, true)
+              setName('')
             }
           },
           children: [
@@ -6808,16 +7503,16 @@ function GroupDialog({ bot, onClose }) {
               value: name,
               onChange: event => setName(event.target.value)
             }),
-            jsx(Button, { type: 'submit', size: 'sm', disabled: !name.trim(), children: 'Create' })
+            jsx(Button, { type: 'submit', size: 'sm', disabled: !name.trim(), children: 'Create & join' })
           ]
         }),
-        current
+        current.length
           ? jsx(Button, {
               variant: 'ghost',
               size: 'sm',
               className: 'justify-self-start',
-              onClick: () => assign(null),
-              children: `Remove from “${current}”`
+              onClick: () => saveBotMeta(bot.name, { groups: [], group: null }),
+              children: 'Remove from all groups'
             })
           : null
       ]
@@ -6826,9 +7521,9 @@ function GroupDialog({ bot, onClose }) {
 }
 
 /** Discord-style group chat creation: pick 2+ bots via checkboxes (with
- *  search), name the group, create. Assignment is the existing per-bot
- *  `group` meta field, so the room appears in the roster and syncs
- *  cross-machine via ui_meta exactly like Move-to-group. */
+ *  search), name the group, create. Assignment appends to each local bot's
+ *  group membership list, so the room appears in the roster and syncs
+ *  cross-machine via ui_meta without replacing its other groups. */
 function CreateGroupChatDialog({ open, roster, onClose, onCreated }) {
   const allMeta = useValue($botMeta)
   const [query, setQuery] = useState('')
@@ -6853,39 +7548,50 @@ function CreateGroupChatDialog({ open, roster, onClose, onCreated }) {
   const canCreate = selected.length >= 2 && Boolean(name.trim() || selected.length)
 
   const create = () => {
-    const groupName = (name.trim() || placeholder).slice(0, 64)
+    let groupName = (name.trim() || placeholder).slice(0, 64)
 
     if (selected.length < 2 || !groupName) {
       return
     }
 
-    for (const bot of selected) {
-      if (!bot.remoteSource) {
-        void saveBotMeta(bot.name, { group: groupName })
+    // Creating a group is always a FRESH room. Without this, re-creating a
+    // group under an existing name (easy — the default name is just the
+    // member names) silently reopens the old room with its full log, which
+    // reads as "not a fresh group" (db's Aug 2026 report). Uniquify against
+    // both live rooms and any bot's current grouping.
+    const taken = new Set(Object.keys($groupChats.get()))
+
+    for (const meta of Object.values($botMeta.get() || {})) {
+      for (const existing of botGroups(meta)) {
+        taken.add(existing)
       }
     }
 
-    // Members from OTHER connections can't ride bot-meta (it is scoped to
-    // the active gateway and name-keyed). Their descriptors live on the room
-    // record instead, so the roster merge can seat them every refresh.
-    const remoteMembers = selected
-      .filter(bot => bot.remoteSource)
-      .map(bot => ({
-        name: bot.name,
-        handle: bot.handle || bot.name,
-        connectionId: bot.connectionId,
-        connectionKind: bot.connectionKind,
-        connectionLabel: bot.connectionLabel,
-        remoteSource: true,
-        sourceScoped: true
-      }))
+    if (taken.has(groupName)) {
+      let n = 2
 
-    if (remoteMembers.length) {
-      updateGroupChat(groupName, room => {
-        room.members = remoteMembers
-        return room
-      })
+      while (taken.has(`${groupName} ${n}`)) {
+        n += 1
+      }
+
+      groupName = `${groupName} ${n}`.slice(0, 64)
     }
+
+    for (const bot of selected) {
+      if (!bot.remoteSource) {
+        void saveBotMeta(bot.name, groupMembershipPatch(botRosterMeta(bot, allMeta), groupName, true))
+      }
+    }
+
+    // Persist every machine identity, including today's active source. That
+    // member becomes remote after a source switch and cannot rely on the new
+    // gateway's name-keyed bot metadata to remain seated in this room.
+    const roomMembers = durableGroupChatMembers(selected)
+
+    updateGroupChat(groupName, room => {
+      room.members = roomMembers
+      return room
+    })
 
     host.notify({ kind: 'info', message: `“${groupName}” created with ${selected.length} bots` })
     onClose()
@@ -6906,7 +7612,7 @@ function CreateGroupChatDialog({ open, roster, onClose, onCreated }) {
           children: [
             jsx(DialogTitle, { children: 'New Group Chat' }),
             jsx(DialogDescription, {
-              children: `Pick 2–${GROUP_CHAT_MAX_MEMBERS} bots. The room lives in the Bots roster and syncs to every machine.`
+              children: `Pick 2–${GROUP_CHAT_MAX_MEMBERS} bots. Local memberships sync through each Bot profile; cross-machine members stay scoped to this room.`
             })
           ]
         }),
@@ -6944,7 +7650,7 @@ function CreateGroupChatDialog({ open, roster, onClose, onCreated }) {
                   const { shape, color, image } = botAppearance(bot.name, meta)
                   const isChecked = Boolean(checked[botRosterKey(bot)])
                   const disabled = !isChecked && atCap
-                  const currentGroup = (meta?.group || '').trim()
+                  const currentGroups = botGroups(meta)
 
                   return jsxs('label', {
                     className: cn(
@@ -6966,8 +7672,8 @@ function CreateGroupChatDialog({ open, roster, onClose, onCreated }) {
                           jsx('div', {
                             className: 'truncate text-[0.625rem] text-(--ui-text-quaternary)',
                             children: [
-                              currentGroup
-                                ? `@${botHandle(bot.name, bot)} · in “${currentGroup}”`
+                              currentGroups.length
+                                ? `@${botHandle(bot.name, bot)} · in ${currentGroups.map(group => `“${group}”`).join(', ')}`
                                 : `@${botHandle(bot.name, bot)}`,
                               bot.remoteSource && bot.connectionLabel ? ` · ${bot.connectionLabel}` : ''
                             ].join('')
@@ -7017,15 +7723,216 @@ function CreateGroupChatDialog({ open, roster, onClose, onCreated }) {
   })
 }
 
+// ── threads: the Slack/Discord shape ─────────────────────────────────────────
+// Every room entry belongs to a THREAD. Messaging the room composer starts a
+// new thread with the whole group; replying inside a thread continues that
+// work. Member turns are scoped to the thread that triggered them — deltas,
+// watermarks, and responder resolution all key on the thread id.
+
+function groupThreadOf(entry) {
+  return entry?.thread || 'legacy'
+}
+
+function mintGroupThreadId() {
+  return `t${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`
+}
+
+// Pre-thread logs (hydrated from storage) get synthetic thread ids: a user
+// entry after a real lull starts one, so multi-turn tasks stay whole instead
+// of splitting on every follow-up.
+const GROUP_THREAD_GAP_MS = 15 * 60000
+
+function assignLegacyThreads(log) {
+  let current = null
+  let n = 0
+
+  return (log || []).map((entry, i) => {
+    if (entry?.thread) {
+      current = null
+
+      return entry
+    }
+
+    const prev = log[i - 1]
+    const lull = !prev || (entry.at || 0) - (prev.at || 0) > GROUP_THREAD_GAP_MS
+
+    if (!current || (entry.from?.kind === 'user' && lull)) {
+      current = `legacy-${n++}`
+    }
+
+    return { ...entry, thread: current }
+  })
+}
+
 /** Merged room view for one group: shared timeline with per-member
  *  attribution, a composer that drives the round-robin, and a working
- *  indicator while member turns run. */
-function GroupChatWorkspace({ group, members }) {
+ *  indicator while member turns run. Renders identically in the MAIN chat
+ *  window (host.openWorkspace tile) and in the bots panel (older-desktop
+ *  fallback); `onBack` is where the Back button routes — the main tile's
+ *  closer, or clearing the in-panel workspace atom. */
+/** The active @-token at the caret: text from the nearest '@' (that begins a
+ *  word) up to the caret, or null when the caret isn't inside a mention. */
+function mentionTokenAt(text, caret) {
+  const upto = String(text || '').slice(0, caret)
+  const match = /(^|\s)@([a-z0-9._-]*)$/i.exec(upto)
+
+  if (!match) {
+    return null
+  }
+
+  return { query: match[2].toLowerCase(), start: caret - match[2].length - 1 }
+}
+
+/** Mention-aware composer input for group rooms. The core composer's
+ *  @-completion area doesn't mount inside workspace tiles (#89049), so this
+ *  wraps the plain SDK Input with a member-scoped popover: @everyone/@all
+ *  quick picks plus each seated member's handle. Insertion produces exactly
+ *  the strings parseGroupChatMentions resolves. Keyboard: Up/Down navigate,
+ *  Enter/Tab insert (Enter falls through to submit when the popover is
+ *  closed), Escape dismisses. */
+function GroupMentionInput({ members, onChange, value, ...inputProps }) {
+  const allMeta = useValue($botMeta)
+  const inputRef = useRef(null)
+  const [token, setToken] = useState(null)
+  const [selected, setSelected] = useState(0)
+
+  const options = []
+
+  if (token) {
+    for (const pick of ['everyone', 'all']) {
+      if (pick.startsWith(token.query)) {
+        options.push({ handle: pick, meta: 'Every bot in the room' })
+      }
+    }
+
+    for (const member of members) {
+      const handle = String(member.handle || botHandle(member.name, member) || '').trim()
+
+      if (!handle || (token.query && !handle.toLowerCase().startsWith(token.query))) {
+        continue
+      }
+
+      options.push({
+        handle,
+        meta: displayName(member, botRosterMeta(member, allMeta))
+      })
+    }
+  }
+
+  const open = Boolean(token) && options.length > 0
+  const active = open ? Math.min(selected, options.length - 1) : 0
+
+  const refreshToken = target => {
+    setToken(mentionTokenAt(target.value, target.selectionStart ?? target.value.length))
+    setSelected(0)
+  }
+
+  const insert = handle => {
+    if (!token) {
+      return
+    }
+
+    const caret = inputRef.current?.selectionStart ?? value.length
+    const next = `${value.slice(0, token.start)}@${handle} ${value.slice(caret)}`
+    onChange(next)
+    setToken(null)
+
+    // Restore focus with the caret after the inserted mention.
+    const pos = token.start + handle.length + 2
+    requestAnimationFrame(() => {
+      const el = inputRef.current
+
+      if (el) {
+        el.focus()
+        try {
+          el.setSelectionRange(pos, pos)
+        } catch {
+          /* input type without selection support */
+        }
+      }
+    })
+  }
+
+  return jsxs('div', {
+    className: 'relative min-w-0 flex-1',
+    children: [
+      open
+        ? jsx('div', {
+            className:
+              'absolute bottom-full left-0 z-50 mb-1 max-h-48 w-64 overflow-y-auto rounded-md border border-(--ui-stroke-secondary) bg-(--ui-bg-primary,#111) py-1 shadow-lg',
+            children: options.map((option, index) =>
+              jsxs('button', {
+                type: 'button',
+                className: cn(
+                  'flex w-full items-baseline gap-2 px-2 py-1 text-left text-xs',
+                  index === active ? 'bg-(--ui-control-hover-background) text-foreground' : 'text-(--ui-text-secondary)'
+                ),
+                // preventDefault on mousedown so the input keeps focus.
+                onMouseDown: event => {
+                  event.preventDefault()
+                  insert(option.handle)
+                },
+                onMouseEnter: () => setSelected(index),
+                children: [
+                  jsx('span', { className: 'font-medium', children: `@${option.handle}` }),
+                  jsx('span', { className: 'truncate text-[0.65rem] text-(--ui-text-quaternary)', children: option.meta })
+                ]
+              }, option.handle)
+            )
+          })
+        : null,
+      jsx(Input, {
+        ...inputProps,
+        ref: inputRef,
+        value,
+        onChange: event => {
+          onChange(event.target.value)
+          refreshToken(event.target)
+        },
+        onClick: event => refreshToken(event.target),
+        onKeyDown: event => {
+          if (!open) {
+            return
+          }
+
+          if (event.key === 'ArrowDown') {
+            event.preventDefault()
+            setSelected((active + 1) % options.length)
+          } else if (event.key === 'ArrowUp') {
+            event.preventDefault()
+            setSelected((active - 1 + options.length) % options.length)
+          } else if (event.key === 'Enter' || event.key === 'Tab') {
+            event.preventDefault()
+            insert(options[active].handle)
+          } else if (event.key === 'Escape') {
+            event.preventDefault()
+            setToken(null)
+          }
+        },
+        onBlur: () => setToken(null)
+      })
+    ]
+  })
+}
+
+function GroupChatWorkspace({ group, members, onBack }) {
   const rooms = useValue($groupChats)
   const allMeta = useValue($botMeta)
   const room = rooms[group] || { log: [], running: false }
   const [draft, setDraft] = useState('')
   const [confirmDisband, setConfirmDisband] = useState(false)
+  // Click-to-disambiguate: which log entry is showing its speaker's full
+  // @handle (the roster's name-device form when names collide across
+  // connections). Naturally every speaker just shows its display name.
+  const [revealedSpeaker, setRevealedSpeaker] = useState(null)
+  // Threads, the Slack/Discord shape: entries carry a thread id. The most
+  // recently active thread renders open; older ones collapse to summary rows.
+  // `openThreads` is the user's explicit expand/collapse overrides, and
+  // `replyThread` is the thread whose reply box currently owns the composer
+  // (null = the main composer, which STARTS a new thread).
+  const [openThreads, setOpenThreads] = useState({})
+  const [replyThread, setReplyThread] = useState(null)
+  const [replyDrafts, setReplyDrafts] = useState({})
 
   const header = jsxs('div', {
     className: 'flex items-center gap-2 px-2.5 pt-2.5 pb-2',
@@ -7033,12 +7940,28 @@ function GroupChatWorkspace({ group, members }) {
       jsx(Button, {
         variant: 'ghost',
         size: 'sm',
-        onClick: () => $groupChatWorkspace.set(null),
+        onClick: () => (onBack ? onBack() : $groupChatWorkspace.set(null)),
         children: 'Back'
       }),
       jsx('div', {
         className: 'min-w-0 flex-1 truncate text-sm font-semibold',
         children: `${group} — group chat`
+      }),
+      // Member faces: the room's roster at a glance, matching each bot's
+      // avatar in the sidebar. Falls back to the count for the title tooltip.
+      jsx('div', {
+        className: 'flex shrink-0 items-center -space-x-1.5',
+        title: members.map(b => displayName(b, botRosterMeta(b, allMeta))).join(', '),
+        children: members.slice(0, 6).map(b => {
+          const bMeta = botRosterMeta(b, allMeta)
+          const { shape, color, image } = botAppearance(b.name, bMeta)
+          const photo = Boolean(image && !isBackfilledFacePng(image))
+
+          return jsx('div', {
+            className: 'rounded-full ring-2 ring-(--ui-bg-primary,#111)',
+            children: jsx(BotFace, { shape, color, image: photo ? image : null, size: 20, name: b.name })
+          }, botRosterKey(b))
+        })
       }),
       jsx('span', {
         className: 'shrink-0 text-[0.65rem] text-(--ui-text-quaternary)',
@@ -7055,6 +7978,12 @@ function GroupChatWorkspace({ group, members }) {
     ]
   })
 
+  const memberDescriptors = () =>
+    members.map(b => ({
+      ...b,
+      title: (b.remoteSource ? '' : allMeta[b.name]?.title) || b.title || ''
+    }))
+
   const submit = () => {
     const text = draft.trim()
 
@@ -7063,17 +7992,236 @@ function GroupChatWorkspace({ group, members }) {
     }
 
     setDraft('')
+    // Main composer = START A NEW THREAD with the whole group (Slack shape).
     // Full descriptors ride into the turn loop: remote members keep their
     // connection fields so their turns route to their own machines.
-    sendToGroupChat(
-      group,
-      members.map(b => ({
-        ...b,
-        title: (b.remoteSource ? '' : allMeta[b.name]?.title) || b.title || ''
-      })),
-      text
-    )
+    const minted = sendToGroupChat(group, memberDescriptors(), text)
+
+    if (minted) {
+      setOpenThreads(prev => ({ ...prev, [minted]: true }))
+    }
   }
+
+  const submitReply = thread => {
+    const text = (replyDrafts[thread] || '').trim()
+
+    if (!text) {
+      return
+    }
+
+    setReplyDrafts(prev => ({ ...prev, [thread]: '' }))
+    // Reply box = CONTINUE this thread; the member turns it triggers are
+    // scoped to it.
+    sendToGroupChat(group, memberDescriptors(), text, thread)
+    setOpenThreads(prev => ({ ...prev, [thread]: true }))
+  }
+
+  // One log entry, rendered exactly as before conversation folding existed.
+  const renderEntry = (entry, index) => {
+                  const isUser = entry.from.kind === 'user'
+                  const meta = isUser || entry.from.source ? null : allMeta[entry.from.name]
+                  // Match this speaker back to its member descriptor so display
+                  // names and disambiguating handles come from the roster (the
+                  // primary "default" profile renders as Hermes, remote dupes
+                  // carry their @name-device handle) instead of raw profile ids.
+                  const member = isUser
+                    ? null
+                    : members.find(b =>
+                        b.name === entry.from.name &&
+                        (entry.from.source
+                          ? (b.connectionLabel || b.connectionId) === entry.from.source
+                          : !b.remoteSource)
+                      ) || null
+                  const display = isUser ? 'You' : displayName(member || { name: entry.from.name }, meta)
+                  const entryKey = `${entry.at}:${index}`
+                  const revealed = !isUser && revealedSpeaker === entryKey
+                  // Clicked: append the gateway name so same-named agents on
+                  // two connections are tellable apart on demand.
+                  const label = isUser
+                    ? 'You'
+                    : revealed
+                      ? `${display}${entry.from.source ? `-${entry.from.source}` : ''} (@${botHandle(entry.from.name, member || undefined)})`
+                      : display
+                  // Speaker avatar: same appearance pipeline as the roster
+                  // (custom image/pet, else deterministic shape+color face).
+                  // Remote speakers have no local meta and get the
+                  // deterministic face for their name — stable per bot.
+                  const { shape, color, image } = isUser
+                    ? { shape: null, color: null, image: null }
+                    : botAppearance(entry.from.name, meta)
+                  const photo = Boolean(image && !isBackfilledFacePng(image))
+
+                  return jsxs('div', {
+                    className: cn(
+                      'flex items-start gap-2',
+                      isUser ? 'rounded-md bg-(--chrome-action-hover) px-2 py-1.5' : 'px-2 py-1'
+                    ),
+                    children: [
+                      isUser
+                        ? null
+                        : jsx('div', {
+                            className: 'mt-0.5 shrink-0',
+                            children: jsx(BotFace, {
+                              shape,
+                              color,
+                              image: photo ? image : null,
+                              size: 24,
+                              name: entry.from.name
+                            })
+                          }),
+                      jsxs('div', {
+                        className: 'min-w-0 flex-1',
+                        children: [
+                          jsxs('div', {
+                            className: 'flex items-baseline gap-2',
+                            children: [
+                              isUser
+                                ? jsx('span', {
+                                    className: 'text-[0.7rem] font-semibold text-foreground',
+                                    children: label
+                                  })
+                                : jsx('button', {
+                                    type: 'button',
+                                    className:
+                                      'cursor-pointer border-0 bg-transparent p-0 text-left text-[0.7rem] font-semibold text-(--ui-accent,#4f9cf9)',
+                                    title: revealed ? 'Hide full handle' : 'Show full handle',
+                                    onClick: () => setRevealedSpeaker(revealed ? null : entryKey),
+                                    children: label
+                                  }),
+                              jsx('span', {
+                                className: 'text-[0.625rem] text-(--ui-text-quaternary)',
+                                children: relativeTime(entry.at)
+                              })
+                            ]
+                          }),
+                          jsx('div', {
+                            className:
+                              'text-xs text-(--ui-text-secondary) [&_p]:mb-1 [&_p:last-child]:mb-0 [&_ul]:mb-1 [&_ul]:list-disc [&_ul]:pl-4 [&_ol]:mb-1 [&_ol]:list-decimal [&_ol]:pl-4 [&_pre]:overflow-x-auto',
+                            children: Streamdown ? jsx(Streamdown, { children: entry.text }) : entry.text
+                          })
+                        ]
+                      })
+                    ]
+                  }, entryKey)
+  }
+
+  // Threads: group entries by thread id (hydration assigned legacy ids, but
+  // guard live pre-thread entries too), ordered by last activity — oldest
+  // first, so the busiest/newest thread sits at the bottom by the composer.
+  // The most recently ACTIVE thread renders open; older ones collapse to a
+  // Slack-style summary row unless explicitly opened. Every open thread gets
+  // its own reply box, which continues THAT thread.
+  const threadsById = new Map()
+
+  for (let i = 0; i < room.log.length; i++) {
+    const entry = room.log[i]
+    const id = groupThreadOf(entry)
+    let bucket = threadsById.get(id)
+
+    if (!bucket) {
+      bucket = { entries: [], id, startIndex: i }
+      threadsById.set(id, bucket)
+    }
+
+    bucket.entries.push({ entry, index: i })
+  }
+
+  const threads = [...threadsById.values()].sort(
+    (a, b) => (a.entries[a.entries.length - 1].entry.at || 0) - (b.entries[b.entries.length - 1].entry.at || 0)
+  )
+  const newestThread = threads.length ? threads[threads.length - 1].id : null
+  const logChildren = []
+
+  threads.forEach(threadBucket => {
+    const { entries, id } = threadBucket
+    const head = entries.find(({ entry }) => entry.from.kind === 'user')?.entry || entries[0].entry
+    const isNewest = id === newestThread
+    const expanded = openThreads[id] ?? isNewest
+
+    if (!expanded) {
+      const replies = entries.length - 1
+      const headText = stripPreviewMarkdown(head?.text || '').slice(0, 80)
+
+      logChildren.push(
+        jsxs('button', {
+          type: 'button',
+          className:
+            'flex w-full items-center gap-2 rounded-md border border-(--ui-stroke-secondary) px-2 py-1.5 text-left text-xs text-(--ui-text-tertiary) transition-colors hover:bg-(--chrome-action-hover)',
+          title: 'Open this thread',
+          onClick: () => setOpenThreads(prev => ({ ...prev, [id]: true })),
+          children: [
+            jsx(Codicon, { name: 'chevron-right', className: 'shrink-0 text-[0.65rem]' }),
+            jsx('span', { className: 'min-w-0 flex-1 truncate', children: headText || 'Thread' }),
+            jsx('span', {
+              className: 'shrink-0 text-[0.625rem] text-(--ui-text-quaternary)',
+              children: `${replies} ${replies === 1 ? 'reply' : 'replies'} · ${relativeTime(entries[entries.length - 1].entry.at)}`
+            })
+          ]
+        }, `fold:${id}`)
+      )
+
+      return
+    }
+
+    // Open thread: a rail-indented block — collapse affordance, its entries,
+    // and its own reply box (Slack's "reply in thread").
+    const threadRows = []
+
+    if (!isNewest || openThreads[id] !== undefined) {
+      threadRows.push(
+        jsxs('button', {
+          type: 'button',
+          className:
+            'flex w-full items-center gap-1.5 px-2 pt-1 text-left text-[0.65rem] text-(--ui-text-quaternary) transition-colors hover:text-foreground',
+          title: 'Collapse this thread',
+          onClick: () => setOpenThreads(prev => ({ ...prev, [id]: false })),
+          children: [jsx(Codicon, { name: 'chevron-down', className: 'text-[0.6rem]' }), 'Collapse thread']
+        }, `unfold:${id}`)
+      )
+    }
+
+    for (const { entry, index } of entries) {
+      threadRows.push(renderEntry(entry, index))
+    }
+
+    // Reply-in-thread: the newest thread's continuation ALSO lives here, so
+    // the main composer below can stay "new thread" without ambiguity.
+    threadRows.push(
+      replyThread === id
+        ? jsxs('form', {
+            className: 'flex items-center gap-1.5 px-2 pb-1',
+            onSubmit: event => {
+              event.preventDefault()
+              submitReply(id)
+            },
+            children: [
+              jsx(GroupMentionInput, {
+                'aria-label': 'Reply in thread',
+                autoFocus: true,
+                placeholder: 'Reply in thread…',
+                members,
+                value: replyDrafts[id] || '',
+                onChange: text => setReplyDrafts(prev => ({ ...prev, [id]: text }))
+              }),
+              jsx(Button, { type: 'submit', size: 'sm', disabled: !(replyDrafts[id] || '').trim(), children: 'Reply' })
+            ]
+          }, `replybox:${id}`)
+        : jsx('button', {
+            type: 'button',
+            className:
+              'w-fit px-2 pb-1 text-left text-[0.65rem] text-(--ui-accent,#4f9cf9) transition-colors hover:underline',
+            onClick: () => setReplyThread(id),
+            children: 'Reply in thread'
+          }, `replylink:${id}`)
+    )
+
+    logChildren.push(
+      jsx('div', {
+        className: 'grid gap-1.5 border-l-2 border-(--ui-stroke-secondary) pl-1.5',
+        children: threadRows
+      }, `thread:${id}`)
+    )
+  })
 
   return jsxs('div', {
     className: 'flex h-full flex-col',
@@ -7085,41 +8233,7 @@ function GroupChatWorkspace({ group, members }) {
           className: 'grid gap-1.5 px-2.5 pb-2',
           children: [
             ...(room.log.length
-              ? room.log.map((entry, index) => {
-                  const isUser = entry.from.kind === 'user'
-                  const meta = isUser || entry.from.source ? null : allMeta[entry.from.name]
-                  const sourceBadge = !isUser && entry.from.source ? ` · ${entry.from.source}` : ''
-                  const label = isUser
-                    ? 'You'
-                    : meta?.title
-                      ? `${meta.title} (@${entry.from.name})${sourceBadge}`
-                      : `@${entry.from.name}${sourceBadge}`
-
-                  return jsxs('div', {
-                    className: isUser ? 'rounded-md bg-(--chrome-action-hover) px-2 py-1.5' : 'px-2 py-1',
-                    children: [
-                      jsxs('div', {
-                        className: 'flex items-baseline gap-2',
-                        children: [
-                          jsx('span', {
-                            className: isUser
-                              ? 'text-[0.7rem] font-semibold text-foreground'
-                              : 'text-[0.7rem] font-semibold text-(--ui-accent,#4f9cf9)',
-                            children: label
-                          }),
-                          jsx('span', {
-                            className: 'text-[0.625rem] text-(--ui-text-quaternary)',
-                            children: relativeTime(entry.at)
-                          })
-                        ]
-                      }),
-                      jsx('div', {
-                        className: 'text-xs text-(--ui-text-secondary) [&_p]:mb-1 [&_p:last-child]:mb-0',
-                        children: Streamdown ? jsx(Streamdown, { children: entry.text }) : entry.text
-                      })
-                    ]
-                  }, `${entry.at}:${index}`)
-                })
+              ? logChildren
               : [
                   jsx('div', {
                     className: 'px-2 py-4 text-center text-xs text-(--ui-text-tertiary)',
@@ -7129,7 +8243,9 @@ function GroupChatWorkspace({ group, members }) {
             room.running
               ? jsx('div', {
                   className: 'px-2 py-1 text-[0.7rem] italic text-(--ui-text-quaternary)',
-                  children: 'The room is working…'
+                  children: room.turn
+                    ? `${groupSpeakerLabel(room.turn)} is thinking…`
+                    : 'The room is working…'
                 }, 'working')
               : null
           ]
@@ -7144,13 +8260,14 @@ function GroupChatWorkspace({ group, members }) {
             submit()
           },
           children: [
-            jsx(Input, {
+            jsx(GroupMentionInput, {
               'aria-label': `Message ${group}`,
-              placeholder: `Message ${group}… (@name to direct, @everyone for all)`,
+              placeholder: `New thread in ${group}… (@name to direct, @everyone for all)`,
+              members,
               value: draft,
-              onChange: event => setDraft(event.target.value)
+              onChange: setDraft
             }),
-            jsx(Button, { type: 'submit', size: 'sm', disabled: !draft.trim(), children: 'Send' })
+            jsx(Button, { type: 'submit', size: 'sm', disabled: !draft.trim(), children: 'New Thread' })
           ]
         })
       }),
@@ -7174,9 +8291,166 @@ function GroupChatWorkspace({ group, members }) {
         doneLabel: 'Disbanded',
         onClose: () => setConfirmDisband(false),
         onConfirm: async () => {
-          await disbandGroupChat(group, members.map(bot => bot.name))
+          await disbandGroupChat(group, members)
           host.notify({ kind: 'success', message: `Disbanded “${group}”` })
         }
+      })
+    ]
+  })
+}
+
+/** Live closers for group-chat MAIN-window tabs, by group name — so a
+ *  disband (or the room view's own Back) can retire the tab it opened. */
+const groupChatMainTabs = new Map()
+
+function closeGroupChatMainTab(group) {
+  const close = groupChatMainTabs.get(group)
+
+  groupChatMainTabs.delete(group)
+
+  if (typeof close === 'function') {
+    try {
+      close()
+    } catch {
+      /* tab already gone */
+    }
+  }
+}
+
+/** Main-window wrapper: seats the member roster reactively (live roster +
+ *  bot meta + the room's stored cross-connection descriptors) so the room
+ *  keeps working as members change while the tab is open. */
+function GroupChatMainView({ group }) {
+  const allMeta = useValue($botMeta)
+  // Subscribe: membership changes ride bot meta AND the room record.
+  useValue($groupChats)
+  const roster = useValue($lastRoster)
+  const members = groupChatMemberBots(group, roster, allMeta)
+
+  return jsx(GroupChatWorkspace, { group, members, onBack: () => closeGroupChatMainTab(group) })
+}
+
+/** Open a group chat the Discord way: a tab taking over the MAIN chat window
+ *  (host.openWorkspace, newer desktops), falling back to the in-panel room
+ *  view on desktops whose SDK predates the main-area door. */
+function openGroupChat(group) {
+  $groupNeedsYou.set({ ...$groupNeedsYou.get(), [group]: false })
+
+  if (typeof host.openWorkspace === 'function') {
+    try {
+      const close = host.openWorkspace(`${ID}:group:${slugify(group)}`, {
+        title: group,
+        minWidth: '24rem',
+        render: () => jsx(GroupChatMainView, { group }),
+        onClose: () => groupChatMainTabs.delete(group)
+      })
+
+      groupChatMainTabs.set(group, close)
+
+      return
+    } catch {
+      // Fall through to the in-panel room below.
+    }
+  }
+
+  $groupChatWorkspace.set(group)
+}
+
+/** One group chat as ONE roster row — the Discord shape: stacked member
+ *  avatars, group name, member count, the newest room line as the preview
+ *  (markdown flattened), relative time of the last activity, and the
+ *  needs-you badge on the row itself. Sorts into the same recency ordering
+ *  as bot rows; clicking opens the room in the main chat window. */
+function GroupRow({ group, members, needsYou, onOpen }) {
+  const rooms = useValue($groupChats)
+  const allMeta = useValue($botMeta)
+  const room = rooms[group] || { log: [] }
+  const log = Array.isArray(room.log) ? room.log : []
+  const last = log.length ? log[log.length - 1] : null
+  const lastAt = groupLastActivity(room)
+  const preview = last
+    ? `${last.from?.kind === 'user' ? 'You' : `@${last.from?.name || 'bot'}`}: ${stripPreviewMarkdown(last.text) || '…'}`
+    : 'No messages yet — say hi to the room'
+  const faces = members.slice(0, 3)
+
+  return jsxs('button', {
+    type: 'button',
+    onClick: () => {
+      haptic('tap')
+      onOpen(group)
+    },
+    className: cn(
+      'flex w-full min-w-0 max-w-full items-center gap-2.5 overflow-hidden rounded-md px-2 py-2 text-left transition-colors',
+      'hover:bg-(--chrome-action-hover)'
+    ),
+    children: [
+      // Composite avatar: up to three member faces fanned like Discord's
+      // group-DM icon; a bare glyph when the room has no seated members.
+      jsx('div', {
+        className: 'flex w-[34px] shrink-0 items-center justify-center',
+        children: faces.length
+          ? jsx('div', {
+              className: 'flex items-center -space-x-2.5',
+              children: faces.map(member => {
+                const meta = member.remoteSource ? null : allMeta[member.name]
+                const { shape, color, image } = botAppearance(member.name, meta)
+
+                return jsx(
+                  'div',
+                  {
+                    className: 'rounded-full ring-2 ring-(--ui-bg-primary,#111)',
+                    children: jsx(BotFace, {
+                      shape,
+                      color,
+                      image: image && !isBackfilledFacePng(image) ? image : null,
+                      size: 20,
+                      name: member.name,
+                      mood: 'idle'
+                    })
+                  },
+                  botRosterKey(member)
+                )
+              })
+            })
+          : jsx(Codicon, { name: 'organization', className: 'text-(--ui-text-tertiary)' })
+      }),
+      jsxs('div', {
+        className: 'min-w-0 flex-1',
+        children: [
+          jsxs('div', {
+            className: 'flex items-baseline justify-between gap-2',
+            children: [
+              jsxs('div', {
+                className: 'flex min-w-0 items-baseline gap-1.5 truncate',
+                children: [
+                  jsx('span', { className: 'truncate text-[0.8125rem] font-medium', children: group }),
+                  jsx('span', {
+                    className: 'shrink-0 text-[0.6875rem] text-(--ui-text-quaternary)',
+                    children: `${members.length} bots`
+                  })
+                ]
+              }),
+              needsYou
+                ? jsx('span', {
+                    className:
+                      'shrink-0 rounded-full bg-(--ui-accent,#4f9cf9) px-1.5 text-[0.6rem] font-semibold text-white',
+                    title: 'A bot in this room needs your input',
+                    children: 'needs you'
+                  })
+                : null,
+              lastAt
+                ? jsx('span', {
+                    className: 'shrink-0 text-[0.6875rem] text-(--ui-text-quaternary)',
+                    children: relativeTime(lastAt)
+                  })
+                : null
+            ]
+          }),
+          jsx('div', {
+            className: 'min-w-0 truncate text-xs text-(--ui-text-tertiary)',
+            children: preview
+          })
+        ]
       })
     ]
   })
@@ -7193,11 +8467,11 @@ function BotsPane() {
   const [deleting, setDeleting] = useState(null)
   const [grouping, setGrouping] = useState(null)
   const [query, setQuery] = useState('')
-  const hideBotChats = useValue($hideBotChats)
   const activityToasts = useValue($activityToasts)
   const sessionsWorkspaceName = useValue($botSessionsWorkspace)
   const groupChatName = useValue($groupChatWorkspace)
   const groupNeedsYou = useValue($groupNeedsYou)
+  const groupRooms = useValue($groupChats)
 
   // The socket opening (boot, SSH reconnect, sleep/wake) is the signal to
   // retry immediately instead of waiting out the poll interval.
@@ -7238,7 +8512,42 @@ function BotsPane() {
     return activityOf(b) - activityOf(a)
   })
   const activeSourceRoster = roster.filter(bot => !bot.remoteSource)
-  const filteredRoster = filterBots(roster, allMeta, query)
+  // Hidden bots (right-click → Hide Bot) drop out of the roster list unless
+  // the header eye toggle reveals them. Display-only: every other consumer
+  // (mentions, group chats, name-collision checks, merge/avatar/activity
+  // sweeps) keeps the FULL roster.
+  const showHidden = useValue($showHiddenBots)
+  const unreadByName = useValue($botUnread)
+  const hiddenBots = roster.filter(bot => isBotHidden(bot, allMeta))
+  const hiddenUnread = hiddenBots.some(bot => !bot.remoteSource && unreadByName[bot.name])
+  const visibleRoster = showHidden ? roster : roster.filter(bot => !isBotHidden(bot, allMeta))
+  const filteredRoster = filterBots(visibleRoster, allMeta, query)
+  // Group chats are first-class roster rows (Discord-style): one standalone
+  // row per room, competing in the SAME recency ordering as bot rows — a
+  // group's activity is its newest room-log line. Pinned bots still lead;
+  // groups and unpinned bots interleave by recency below them.
+  const needle = query.trim().toLowerCase()
+  const groupRows = groupChatNames(allMeta, groupRooms)
+    .filter(name => !needle || name.toLowerCase().includes(needle))
+    .map(name => ({
+      kind: 'group',
+      name,
+      members: groupChatMemberBots(name, roster, allMeta),
+      activity: groupLastActivity(groupRooms[name])
+    }))
+  const rosterRows = [
+    ...filteredRoster.map(bot => ({ kind: 'bot', bot, pinned: isPinned(bot), activity: activityOf(bot) })),
+    ...groupRows
+  ].sort((a, b) => {
+    const pa = a.pinned ? 1 : 0
+    const pb = b.pinned ? 1 : 0
+
+    if (pa !== pb) {
+      return pb - pa
+    }
+
+    return b.activity - a.activity
+  })
 
   if (live) {
     $lastRoster.set(roster)
@@ -7257,32 +8566,7 @@ function BotsPane() {
     return jsx(ProfileSessionsWorkspace, { bot: sessionsWorkspaceBot })
   }
 
-  const groupChatMembers = groupChatName
-    ? (() => {
-        const local = activeSourceRoster.filter(
-          bot => (botRosterMeta(bot, allMeta)?.group || '').trim() === groupChatName
-        )
-        // Remote members live on the room record (they can't ride bot-meta).
-        // Prefer the LIVE roster row for each descriptor when present —
-        // fresher handle/label — else seat the stored descriptor itself.
-        const stored = ($groupChats.get()[groupChatName] || {}).members || []
-        const seated = new Set(local.map(botRosterKey))
-        const remote = []
-
-        for (const descriptor of stored) {
-          const key = botRosterKey(descriptor)
-
-          if (seated.has(key)) {
-            continue
-          }
-
-          seated.add(key)
-          remote.push(roster.find(bot => botRosterKey(bot) === key) || descriptor)
-        }
-
-        return [...local, ...remote]
-      })()
-    : []
+  const groupChatMembers = groupChatName ? groupChatMemberBots(groupChatName, roster, allMeta) : []
 
   if (groupChatName && groupChatMembers.length) {
     return jsx(GroupChatWorkspace, { group: groupChatName, members: groupChatMembers })
@@ -7311,16 +8595,35 @@ function BotsPane() {
                   children: jsx(Codicon, { name: activityToasts ? 'bell' : 'bell-slash' })
                 })
               }),
-              jsx(Tip, {
-                label: hideBotChats ? 'Bot Chats hidden from Sessions — click to show' : 'Bot Chats shown in Sessions — click to hide',
-                children: jsx('button', {
-                  type: 'button',
-                  className:
-                    'flex size-6 items-center justify-center rounded-md text-(--ui-text-tertiary) transition-colors hover:bg-(--chrome-action-hover) hover:text-foreground',
-                  onClick: () => void setHideBotChats(!hideBotChats),
-                  children: jsx(Codicon, { name: hideBotChats ? 'eye-closed' : 'eye' })
-                })
-              }),
+              // Eye toggle appears only once something is hidden — zero
+              // hidden bots means zero extra chrome. It stays visible while
+              // hidden rows are revealed, so Unhide is always reachable.
+              hiddenBots.length
+                ? jsx(Tip, {
+                    label: showHidden
+                      ? 'Hide hidden bots again'
+                      : `Show ${hiddenBots.length} hidden bot${hiddenBots.length === 1 ? '' : 's'}`,
+                    children: jsxs('button', {
+                      type: 'button',
+                      'aria-label': showHidden ? 'Hide hidden bots' : 'Show hidden bots',
+                      className: cn(
+                        'relative flex size-6 items-center justify-center rounded-md transition-colors hover:bg-(--chrome-action-hover) hover:text-foreground',
+                        showHidden ? 'text-foreground' : 'text-(--ui-text-tertiary)'
+                      ),
+                      onClick: () => $showHiddenBots.set(!showHidden),
+                      children: [
+                        jsx(Codicon, { name: showHidden ? 'eye' : 'eye-closed' }),
+                        hiddenUnread && !showHidden
+                          ? jsx('span', {
+                              className:
+                                'absolute right-0.5 top-0.5 size-1.5 rounded-full bg-(--ui-accent,#4f9cf9)',
+                              'aria-label': 'a hidden bot has unread activity'
+                            })
+                          : null
+                      ]
+                    })
+                  })
+                : null,
               jsxs(DropdownMenu, {
                 children: [
                   jsx(Tip, {
@@ -7357,7 +8660,7 @@ function BotsPane() {
         ]
       }),
       jsx(ActiveNowStrip, {
-        roster,
+        roster: visibleRoster,
         activeProfile,
         gatewayState,
         metaByName: allMeta,
@@ -7393,7 +8696,7 @@ function BotsPane() {
             }
 
             try {
-              const id = await openBotCanonicalChat(bot.name, pinnedChat)
+              const id = await openBotCanonicalChat(bot.name, pinnedChat, bot.last_session)
 
               if (id) {
                 return
@@ -7458,61 +8761,40 @@ function BotsPane() {
                 title: 'No agents yet',
                 description: 'Create your first teammate.'
               })
-            : filteredRoster.length === 0
+            : filteredRoster.length === 0 && rosterRows.length === 0
               ? jsx('div', {
                   'aria-live': 'polite',
                   className:
                     'flex flex-1 items-center justify-center px-4 text-center text-xs text-(--ui-text-tertiary)',
                   role: 'status',
-                  children: `No bots match “${query.trim()}”`
+                  children: query.trim()
+                    ? `No bots match “${query.trim()}”`
+                    : 'All bots are hidden — use the eye button above to show them.'
                 })
               : jsx(ScrollArea, {
                   className: 'hermes-bots-roster min-h-0 flex-1',
                   children: jsx('div', {
                     className: 'grid w-full min-w-0 gap-0.5 px-1.5 pb-2',
-                    children: groupRoster(filteredRoster, allMeta).flatMap(section => [
-                      section.group
-                        ? jsxs('div', {
-                            className: 'mt-2 flex items-center gap-2 px-1 pb-0.5 first:mt-0.5',
-                            children: [
-                              jsx('span', {
-                                className:
-                                  'shrink-0 text-[0.625rem] font-semibold uppercase tracking-wider text-(--ui-text-quaternary)',
-                                children: section.group
-                              }),
-                              jsx('div', { className: 'h-px min-w-0 flex-1 bg-(--ui-stroke-secondary)' }),
-                              groupNeedsYou[section.group]
-                                ? jsx('span', {
-                                    className:
-                                      'shrink-0 rounded-full bg-(--ui-accent,#4f9cf9) px-1.5 text-[0.6rem] font-semibold text-white',
-                                    title: 'A bot in this room needs your input',
-                                    children: 'needs you'
-                                  })
-                                : null,
-                              section.bots.length > 1 && section.bots.length <= GROUP_CHAT_MAX_MEMBERS
-                                ? jsx('button', {
-                                    type: 'button',
-                                    className:
-                                      'shrink-0 rounded px-1 text-[0.625rem] font-medium text-(--ui-text-tertiary) transition-colors hover:bg-(--chrome-action-hover) hover:text-foreground',
-                                    title: `Open the ${section.group} group chat`,
-                                    onClick: () => {
-                                      $groupNeedsYou.set({ ...$groupNeedsYou.get(), [section.group]: false })
-                                      $groupChatWorkspace.set(section.group)
-                                    },
-                                    children: 'Open chat'
-                                  })
-                                : null
-                            ]
-                          }, `group:${section.group}`)
-                        : null,
-                      ...section.bots.map(bot =>
-                        jsx(
-                          BotRow,
-                          { bot, onDelete: setDeleting, onEdit: setEditing, onGroup: setGrouping },
-                          botRosterKey(bot)
-                        )
-                      )
-                    ])
+                    // Flat, Discord-style list: bot rows and group rows
+                    // interleaved by recency — no section headers.
+                    children: rosterRows.map(row =>
+                      row.kind === 'group'
+                        ? jsx(
+                            GroupRow,
+                            {
+                              group: row.name,
+                              members: row.members,
+                              needsYou: Boolean(groupNeedsYou[row.name]),
+                              onOpen: openGroupChat
+                            },
+                            `group:${row.name}`
+                          )
+                        : jsx(
+                            BotRow,
+                            { bot: row.bot, onDelete: setDeleting, onEdit: setEditing, onGroup: setGrouping },
+                            botRosterKey(row.bot)
+                          )
+                    )
                   })
                 }),
       jsx('div', {
@@ -7538,7 +8820,7 @@ function BotsPane() {
         // registered connections — their turns route to their own machines.
         roster,
         onClose: () => setGroupCreateOpen(false),
-        onCreated: groupName => $groupChatWorkspace.set(groupName)
+        onCreated: groupName => openGroupChat(groupName)
       }),
       jsx(EditProfileDialog, {
         bot: editing,
@@ -7679,18 +8961,9 @@ export default {
       /* no storage on this shell — defaults stay */
     }
 
-    // Hydrate the "hide Bot Chats from the sidebar" pref (default ON).
-    try {
-      Promise.resolve(ctx.storage?.get?.('hide-bot-chats'))
-        .then(value => {
-          if (typeof value === 'boolean') {
-            $hideBotChats.set(value)
-          }
-        })
-        .catch(() => undefined)
-    } catch {
-      /* no storage — default (hide) stays */
-    }
+    // Bot Mode sessions are always hidden now — the old "hide Bot Chats"
+    // pref is gone (its stored key is simply ignored). The reconciliation
+    // sweep below hides any rows born visible under the old pref.
 
     // Hydrate the activity-toast pref (default OFF).
     try {
@@ -7716,9 +8989,12 @@ export default {
             for (const [name, room] of Object.entries(value)) {
               if (room && Array.isArray(room.log)) {
                 rooms[name] = {
-                  log: room.log,
+                  // Pre-thread entries get synthetic thread ids on hydrate so
+                  // every UI/engine path can assume entry.thread exists.
+                  log: assignLegacyThreads(room.log),
                   watermarks: room.watermarks && typeof room.watermarks === 'object' ? room.watermarks : {},
                   sessions: room.sessions && typeof room.sessions === 'object' ? room.sessions : {},
+                  stranded: room.stranded && typeof room.stranded === 'object' ? room.stranded : {},
                   members: Array.isArray(room.members) ? room.members : [],
                   epoch: 0,
                   running: false
@@ -7736,41 +9012,121 @@ export default {
     }
 
     // Routines follow the chat you're in: track the live gateway profile.
-    host.state.profile.listen(profile => {
+    // Capture the unbinds: without them a disable → re-enable cycle stacks a
+    // duplicate listener per cycle (same survives-disable class as the face
+    // clock before its onDispose hook — these kept firing until app restart).
+    const unbindProfileListener = host.state.profile.listen(profile => {
       if (profile && typeof profile === 'string') {
         $selectedBot.set(profile)
       }
     })
-    host.state.gateway.listen(handleSessionsGatewayTransition)
+    const unbindGatewayListener = host.state.gateway.listen(handleSessionsGatewayTransition)
+
+    if (typeof ctx.onDispose === 'function') {
+      ctx.onDispose(() => {
+        if (typeof unbindProfileListener === 'function') {
+          unbindProfileListener()
+        }
+        if (typeof unbindGatewayListener === 'function') {
+          unbindGatewayListener()
+        }
+      })
+    }
+
+    // Reconciliation sweep: hide every Bot Mode session we know about, on
+    // load and again on each reconnect (a swap can land on a gateway whose
+    // rows were created before the always-hidden policy). Deferred a tick so
+    // the meta/room storage hydrates above have landed; idempotent after that.
+    // (Feature-guarded: bare vm test harnesses have no setTimeout global.)
+    const scheduleHideSweep = () => {
+      try {
+        setTimeout(() => void hideOwnedBotSessions(), 0)
+      } catch {
+        void hideOwnedBotSessions()
+      }
+    }
+    host.state.gateway.listen(state => {
+      if (state === 'open') {
+        scheduleHideSweep()
+      }
+    })
+    scheduleHideSweep()
 
     ctx.register({
       id: 'pane',
       area: 'panes',
       title: 'Bots',
-      // dock: explicit adoption gesture. Without it the tree adopts a
-      // same-placement pane by CENTER-STACKING it into the sessions zone —
-      // and when that zone's header is hidden (lone-pane auto-hide is the
-      // default the user never changed), the sessions pane vanishes behind
-      // the Bots tab with no visible strip to switch back. Splitting below
-      // the sessions pane keeps both surfaces visible instead.
-      data: { placement: 'left', width: '260px', dock: { pane: 'sessions', pos: 'bottom' } },
+      // dock: explicit adoption gesture — CENTER-STACK into the sessions zone
+      // so the sidebar grows a SESSIONS | BOTS tab strip instead of splitting
+      // two cramped panes down the column. Center is safe now: insertAtGroup
+      // pins the zone's header explicitly shown on a center gain (and it
+      // stays shown once the zone has stacked), so the sessions pane can
+      // never vanish behind a stripless Bots tab — the lone-pane auto-hide
+      // trap this dock used to work around with a 'bottom' split.
+      // enforce: standing invariant, not a one-shot migration — the pane
+      // re-homes into the sessions strip at EVERY boot it isn't already
+      // there, whatever tokens or user placement an older install persisted.
+      // The one-time heal ('sessions-tab-v1') burned its token even when its
+      // guards skipped the move, so exactly the users who had fought the old
+      // stacked layout (dragged panes → $userPlacedPanes) stayed stacked
+      // forever. Owner's order: SESSIONS | BOTS is always a tab strip.
+      // An intra-session drag still sticks until the next launch (the
+      // invariant runs at adoption time only — see enforceDockedPanes in the
+      // tree store).
+      data: { placement: 'left', width: '260px', dock: { pane: 'sessions', pos: 'center', enforce: true } },
       render: () => jsx(BotsPane, {})
     })
 
     // Routines — its OWN tiling pane splitting the workspace's right edge
     // (NOT the collapsible right sidebar; placement 'right' is that sidebar's
     // role and hides the pane until "Show Right Sidebar").
-    ctx.register({
-      id: 'routines',
-      area: 'panes',
-      title: 'Cronjobs',
-      data: {
-        placement: 'main',
-        dock: { pane: 'workspace', pos: 'right' },
-        width: '250px'
-      },
-      render: () => jsx(RoutinesPane, {})
-    })
+    //
+    // Registered ONLY while Bot Mode is on screen: the pane exists while the
+    // Bots pane is visible (its zone's active tab, or a lone pane in a
+    // stacked pre-heal layout) and unregisters when the user tabs back to
+    // Sessions — no Cronjobs tile squatting beside the chat outside Bot Mode.
+    // `ctx.register` returns the disposer that makes this cheap; the tree
+    // keeps the pane's spot, so re-registering re-adopts it where it was.
+    // host.paneVisibility is feature-detected: older desktops without the SDK
+    // export keep the always-registered behavior.
+    const registerRoutinesPane = () =>
+      ctx.register({
+        id: 'routines',
+        area: 'panes',
+        title: 'Cronjobs',
+        data: {
+          placement: 'main',
+          dock: { pane: 'workspace', pos: 'right' },
+          width: '250px'
+        },
+        render: () => jsx(RoutinesPane, {})
+      })
+
+    if (typeof host.paneVisibility === 'function') {
+      // The contribution-scoped pane id (`register` prefixes `${ID}:`).
+      const $botsPaneVisible = host.paneVisibility(`${ID}:pane`)
+      let unregisterRoutines = null
+
+      const syncRoutinesPane = visible => {
+        if (visible) {
+          unregisterRoutines ??= registerRoutinesPane()
+        } else if (unregisterRoutines) {
+          unregisterRoutines()
+          unregisterRoutines = null
+        }
+      }
+
+      const stopRoutinesSync = $botsPaneVisible.listen(syncRoutinesPane)
+      syncRoutinesPane($botsPaneVisible.get())
+
+      if (typeof ctx.onDispose === 'function') {
+        // The registration disposer is already tracked by ctx.register; only
+        // the listener needs explicit teardown or it survives plugin disable.
+        ctx.onDispose(stopRoutinesSync)
+      }
+    } else {
+      registerRoutinesPane()
+    }
 
     ctx.register({
       id: 'new-agent',
@@ -7871,12 +9227,15 @@ export default {
           const localMentions = mentionedBots.filter(bot => !bot.remoteSource)
           const remoteMentions = mentionedBots.filter(bot => bot.remoteSource)
 
-          if (remoteMentions.length && typeof host.requestProfile === 'function') {
-            void deliverRemoteRosterMentions(remoteMentions, text)
-          }
-
           const activeMeta = $botMeta.get()[live.name]
           const senderName = displayName({ name: live.name, title: activeMeta?.title }, activeMeta)
+
+          if (remoteMentions.length && typeof host.requestProfile === 'function') {
+            void deliverRemoteRosterMentions(remoteMentions, text, {
+              name: senderName,
+              handle: botHandle(live.name)
+            })
+          }
           let note = ''
 
           if (localMentions.length) {

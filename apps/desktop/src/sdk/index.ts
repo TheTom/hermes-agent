@@ -19,12 +19,20 @@
  */
 
 import { atom, computed, type ReadableAtom } from 'nanostores'
+import type { ReactNode } from 'react'
 
 import { PRIMARY_SESSION_VIEW } from '@/app/chat/session-view'
 import { openSession, type OpenSessionIntent } from '@/app/open-session'
 import type { ClientSessionState } from '@/app/types'
-import { $narrowViewport } from '@/components/pane-shell/tree/store'
+import {
+  $narrowViewport,
+  $paneVisible,
+  registerPaneCloser,
+  removeTreePane,
+  revealTreePane
+} from '@/components/pane-shell/tree/store'
 import { onGatewayEvent } from '@/contrib/events'
+import { registry } from '@/contrib/registry'
 import { deleteProfile, getLogs, getStatus, type HermesGateway } from '@/hermes'
 import {
   $gateway,
@@ -32,7 +40,8 @@ import {
   openGatewayForAgent,
   openGatewayForProfile,
   requestGatewayForAgent,
-  requestGatewayForProfile
+  requestGatewayForProfile,
+  retireLocalProfileGateways
 } from '@/store/gateway'
 import { notify, notifyError } from '@/store/notifications'
 import {
@@ -294,7 +303,17 @@ export const host = {
     // backend can't clobber the pill back to the deleted profile).
     const wasActive = normalizeProfileKey(name) === normalizeProfileKey($activeGatewayProfile.get())
 
+    // A hover-warmed Bot Mode row owns a retained renderer socket. Retire it
+    // before Electron stops the profile backend so the socket closure cannot
+    // schedule a reconnect that resurrects the deleted profile.
+    retireLocalProfileGateways(name)
     await deleteProfile(name)
+
+    // The profile rail paints from the shared $profiles cache; without a
+    // refresh the deleted profile's badge survives and clicking it starts a
+    // doomed spawn-retry loop against Electron's deletion guard (#88769).
+    // Best-effort: the delete itself already succeeded.
+    await refreshProfiles().catch(() => undefined)
 
     if (wasActive) {
       selectProfile('default')
@@ -383,6 +402,59 @@ export const host = {
     )
   },
 
+  /** Open (or re-front) a plugin-rendered MAIN-AREA workspace tile — the same
+   *  surface a session tile or a preview occupies: a closeable tab docked
+   *  beside the main workspace, taking over the chat area when active. This is
+   *  the generic main-view door for plugins whose surface is not a stored
+   *  session (`openSession` stays the door for those). Re-opening the same
+   *  `id` refreshes `render`/`title` in place and fronts the existing tab
+   *  instead of stacking a duplicate. Returns a disposer that closes the tab;
+   *  the tab's own Close (⌘W / strip ✕) routes through the same teardown and
+   *  fires `onClose`. Feature-detect on older desktops
+   *  (`typeof host.openWorkspace === 'function'`) and keep an in-panel
+   *  fallback. */
+  openWorkspace: (
+    id: string,
+    options: { minWidth?: string; onClose?: () => void; render: () => ReactNode; title?: string }
+  ): (() => void) => {
+    const key = (id ?? '').trim()
+
+    if (!key || typeof options?.render !== 'function') {
+      throw new Error('openWorkspace: an id and a render function are required')
+    }
+
+    const paneId = `plugin-workspace:${key}`
+
+    const dispose = registry.register({
+      area: 'panes',
+      data: {
+        // The session-tile shape: a full workspace surface docked beside main,
+        // closeable so it keeps its tab when it lands in a zone of its own.
+        dock: { pane: 'workspace', pos: 'center' },
+        minWidth: options.minWidth ?? '22rem',
+        placement: 'main'
+      },
+      id: paneId,
+      render: options.render,
+      title: options.title ?? key
+    })
+
+    const close = () => {
+      registerPaneCloser(paneId)
+      dispose()
+      removeTreePane(paneId)
+      options.onClose?.()
+    }
+
+    // Route the tab's Close through OUR teardown: without a closer, closing a
+    // core-sourced contributed pane only dismisses it and the registration
+    // would leak past the plugin surface that owns it.
+    registerPaneCloser(paneId, close)
+    revealTreePane(paneId)
+
+    return close
+  },
+
   /** Start a fresh chat draft, optionally pointed at another profile (its
    *  backend spins up in the background — same door the sidebar's per-profile
    *  "+" uses). */
@@ -390,6 +462,14 @@ export const host = {
     newSessionInProfile((profile ?? '').trim() || $activeGatewayProfile.get())
     window.location.hash = '#/'
   },
+
+  /** Reactive on-screen visibility of a contributed pane: true while it is in
+   *  the layout tree, not dismissed/hidden, its zone un-minimized, AND holding
+   *  its zone's active tab slot (a lone pane in its own zone counts). The
+   *  contribution-scoped pane id is `<pluginId>:<paneId>`. Memoized per id —
+   *  safe to call in render. Feature-detect on older desktops
+   *  (`typeof host.paneVisibility === 'function'`). */
+  paneVisibility: (paneId: string): ReadableAtom<boolean> => $paneVisible(paneId),
 
   /** HEAR the gateway stream (message deltas, session lifecycle, tool
    *  activity, …) by event type — `'*'` for everything. Returns a disposer.
