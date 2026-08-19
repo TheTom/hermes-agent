@@ -95,22 +95,6 @@ String _shellDoubleQuote(String value) => value
     .replaceAll(r'$', r'\$')
     .replaceAll('`', r'\`');
 
-({HermesBotProfile lead, HermesBotProfile target})? _directedMentionPair(
-  String text,
-  Iterable<HermesBotProfile> mentioned,
-) {
-  final match = RegExp(
-    r'(?:^|\s)@([a-z0-9][a-z0-9_-]*)\s+(?:ask|asks|as|talk(?:s)?\s+(?:to|with)|speak(?:s)?\s+(?:to|with)|chat(?:s)?\s+with)\s+@([a-z0-9][a-z0-9_-]*)\b',
-    caseSensitive: false,
-  ).firstMatch(_proseWithoutCode(text));
-  if (match == null) return null;
-  final byHandle = {for (final bot in mentioned) bot.handle.toLowerCase(): bot};
-  final lead = byHandle[(match.group(1) ?? '').toLowerCase()];
-  final target = byHandle[(match.group(2) ?? '').toLowerCase()];
-  if (lead == null || target == null || lead.name == target.name) return null;
-  return (lead: lead, target: target);
-}
-
 /// Mirrors Desktop Bot Mode's mention middleware.
 ///
 /// The active agent receives one asynchronous handoff recipe per mentioned
@@ -129,33 +113,6 @@ String appendBotMentionHandoff({
     activeProfile: activeProfile,
   );
   if (mentioned.isEmpty) return text;
-
-  final directed = _directedMentionPair(text, mentioned);
-  if (directed != null) {
-    final lead = directed.lead;
-    final target = directed.target;
-    return '$text\n\n'
-        '[@mention handoff — directed exchange: the user wants @${lead.handle} '
-        'to ask @${target.handle}, not two independent answers. COMPOSE a '
-        'focused question for ${target.displayName}, then a short follow-up '
-        'for ${lead.displayName} asking for the final answer after considering '
-        '${target.displayName}\'s response. Run exactly this two-stage shell '
-        'pipeline in one terminal call with background=true AND '
-        'notify_on_complete=true (avoid double quotes in your composed text):\n'
-        '`bot_reply=\$(hermes -p ${_shellQuote(target.name)} chat --in ~ '
-        '-c "Bot Chat" --create-if-missing -Q -q "Message from 🤖 '
-        '${_shellDoubleQuote(senderName)} '
-        '(@${_shellDoubleQuote(senderHandle)}), relaying a question from '
-        '${_shellDoubleQuote(lead.displayName)} (@${lead.handle}): '
-        '<your composed question>"); hermes -p ${_shellQuote(lead.name)} '
-        'chat --in ~ -c "Bot Chat" --create-if-missing -Q -q "Message from '
-        '🤖 ${_shellDoubleQuote(target.displayName)} (@${target.handle}), '
-        'relayed by ${_shellDoubleQuote(senderName)}: \$bot_reply. '
-        '<your composed follow-up requesting the final answer>"`\n'
-        'After dispatching, tell the user the exchange started and END YOUR '
-        'TURN. Do not wait or poll. When the background completion arrives, '
-        'relay only the final answer, attributed to ${lead.displayName}.]';
-  }
 
   final handles = mentioned.map((bot) => bot.handle).join(', ');
   final commands = mentioned.map(

@@ -73,49 +73,6 @@ void main() {
     expect(result, contains('each mentioned agent (techno, coach-helper)'));
   });
 
-  test(
-    'directed mentions run a two-stage exchange and return the lead reply',
-    () {
-      final result = appendBotMentionHandoff(
-        text: '@techno ask @coach-helper about recovery',
-        roster: roster,
-        activeProfile: 'default',
-        senderName: 'Hermes',
-        senderHandle: 'hermes',
-      );
-
-      expect(result, contains('directed exchange'));
-      expect(result, contains("bot_reply=\$(hermes -p 'coach-helper'"));
-      expect(result, contains("hermes -p 'techno'"));
-      expect(result, contains(r'$bot_reply'));
-      expect(result, contains('relay only the final answer'));
-    },
-  );
-
-  test('common ask typo still produces a directed exchange', () {
-    final result = appendBotMentionHandoff(
-      text: '@techno as @coach-helper about recovery',
-      roster: roster,
-      activeProfile: 'default',
-      senderName: 'Hermes',
-      senderHandle: 'hermes',
-    );
-    expect(result, contains('directed exchange'));
-  });
-
-  test('conversation phrasing produces a directed exchange', () {
-    for (final phrase in ['talk to', 'talk with', 'speak to', 'chat with']) {
-      final result = appendBotMentionHandoff(
-        text: '@techno $phrase @coach-helper about recovery',
-        roster: roster,
-        activeProfile: 'default',
-        senderName: 'Hermes',
-        senderHandle: 'hermes',
-      );
-      expect(result, contains('directed exchange'), reason: phrase);
-    }
-  });
-
   test('internal background continuation is hidden from the transcript', () {
     const internal = HermesMessage(
       id: '1',
