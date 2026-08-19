@@ -100,7 +100,7 @@ String _shellDoubleQuote(String value) => value
   Iterable<HermesBotProfile> mentioned,
 ) {
   final match = RegExp(
-    r'(?:^|\s)@([a-z0-9][a-z0-9_-]*)\s+(?:ask|asks|as)\s+@([a-z0-9][a-z0-9_-]*)\b',
+    r'(?:^|\s)@([a-z0-9][a-z0-9_-]*)\s+(?:ask|asks|as|talk(?:s)?\s+(?:to|with)|speak(?:s)?\s+(?:to|with)|chat(?:s)?\s+with)\s+@([a-z0-9][a-z0-9_-]*)\b',
     caseSensitive: false,
   ).firstMatch(_proseWithoutCode(text));
   if (match == null) return null;
