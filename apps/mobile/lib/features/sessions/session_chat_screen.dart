@@ -2040,7 +2040,9 @@ class SessionChatScreenState extends ConsumerState<SessionChatScreen> {
     // scrolled up mid-stream is handled by `_chatObserver` correcting the
     // scroll offset during layout (see the `standby()` call sites), not by
     // holding back what gets rendered.
-    final renderMessages = _messages;
+    final renderMessages = _messages
+        .where((message) => !isInternalBackgroundCompletion(message))
+        .toList(growable: false);
     final artifactPaths = _knownArtifactPaths(renderMessages);
     final botProfiles =
         ref.watch(botsProvider).value?.profiles ?? const <HermesBotProfile>[];
