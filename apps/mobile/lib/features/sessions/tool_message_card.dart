@@ -121,12 +121,16 @@ class _ToolMessageContentState extends State<ToolMessageContent> {
     final theme = Theme.of(context);
     final presentation = presentToolMessage(widget.message);
     final hasDetails = presentation.details?.isNotEmpty ?? false;
+    final hasLongSummary =
+        presentation.summary.length > 120 ||
+        presentation.summary.contains('\n');
+    final canExpand = hasDetails || hasLongSummary;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         InkWell(
-          onTap: hasDetails
+          onTap: canExpand
               ? () => setState(() => _expanded = !_expanded)
               : null,
           borderRadius: BorderRadius.circular(8),
@@ -150,7 +154,7 @@ class _ToolMessageContentState extends State<ToolMessageContent> {
                     ),
                   ),
                 ),
-                if (hasDetails) ...[
+                if (canExpand) ...[
                   const SizedBox(width: 4),
                   AnimatedRotation(
                     turns: _expanded ? 0.5 : 0,
@@ -169,6 +173,8 @@ class _ToolMessageContentState extends State<ToolMessageContent> {
         const SizedBox(height: 5),
         Text(
           presentation.summary,
+          maxLines: _expanded ? null : 2,
+          overflow: _expanded ? TextOverflow.visible : TextOverflow.ellipsis,
           style: theme.textTheme.bodyMedium?.copyWith(
             color: theme.colorScheme.onSurface,
           ),

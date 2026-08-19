@@ -67,4 +67,30 @@ void main() {
     );
     expect(find.textContaining('"name": "apple-health"'), findsOneWidget);
   });
+
+  testWidgets('long tool output is collapsed by default and expands on tap', (
+    tester,
+  ) async {
+    final longOutput = List.filled(30, 'metadata').join(' ');
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: ToolMessageContent(
+            message: _tool('skill_view', context: longOutput),
+          ),
+        ),
+      ),
+    );
+
+    var summary = tester.widget<Text>(find.text('Opened $longOutput'));
+    expect(summary.maxLines, 2);
+    expect(summary.overflow, TextOverflow.ellipsis);
+
+    await tester.tap(find.text('Skill'));
+    await tester.pumpAndSettle();
+
+    summary = tester.widget<Text>(find.text('Opened $longOutput'));
+    expect(summary.maxLines, isNull);
+    expect(summary.overflow, TextOverflow.visible);
+  });
 }
