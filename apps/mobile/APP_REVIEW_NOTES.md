@@ -11,11 +11,10 @@ Review Information field.
 <!-- BEGIN NOTES BLOCK -->
 WHAT THIS APP IS
 
-Hermes Go is a client for a Hermes agent gateway that the user runs on their
-own computer. It is the same relationship an SSH client or a NAS app has with
-a server the user runs themselves. We operate no backend. Target audience is
-developers and technical users who already self-host a Hermes agent and want
-to reach it from their phone.
+Hermes Go is a client for a Hermes agent gateway the user runs on their own
+computer, the same relationship an SSH client has with a server the user runs
+themselves. We operate no backend. Target audience is developers and
+technical users who already self-host a Hermes agent.
 
 DEMO ACCESS (no server required)
 
@@ -27,62 +26,66 @@ A sample workspace is built into the app, so review needs no server.
 5. Password: demo
 6. Tap Sign In.
 
-Then: open a seeded chat from the drawer (menu icon, top left); send a message
-and watch the reply stream with a live tool call; start a new chat; switch
-models from the composer; open the Bots screen to see the saved bots; open the
-Jobs tab and pause or resume a scheduled job; open Settings, then About, for
-the line documenting this sample workspace.
+Then: open a seeded chat from the drawer (menu icon, top left); send a
+message and watch the reply stream with a live tool call; switch models from
+the composer; open the Bots screen; open the Jobs tab and pause a job; open
+Settings, then About.
 
-The sample workspace runs entirely on device on 127.0.0.1. No network calls
-leave the device. It is available to every user, not only reviewers, is
-documented in Settings, then About, and the app does no reviewer detection.
-A "Sample" chip is shown while it is active so scripted replies cannot be
-mistaken for a real agent.
+It runs entirely on device on 127.0.0.1 and no network calls leave the
+device. It is available to every user, not only reviewers, is documented in
+Settings, then About, and the app does no reviewer detection. A "Sample" chip
+shows while it is active so scripted replies cannot be mistaken for a real
+agent.
 
 BOTS
 
 A bot is a saved configuration on the user's own gateway: a name, a model and
-a set of instructions. Selecting one starts a chat that uses that
-configuration. Bots are created and stored by the user's own server. The app
-only lists them and opens a chat against one. Nothing about a bot leaves the
-user's device except to the gateway address the user entered.
+a set of instructions. Bots are created and stored by that server. The app
+lists them and opens a chat against one.
+
+APPLE HEALTH
+
+Off by default and opt-in from Settings. When the user turns it on, iOS shows
+the standard Health permission sheet and the user chooses which categories to
+allow. The app only reads. It never writes or changes anything in Apple
+Health, which is what the update purpose string states.
+
+Readings the user allows are sent to that user's own Hermes gateway, the
+self-hosted server described above, so their health bot can summarize trends
+for them. Health data is never sent to us, never shared with any third party,
+and never used for advertising or marketing. We run no server that could
+receive it. Turning the setting off stops the sync and clears its stored
+state.
 
 ACCOUNTS, PURCHASES, CONTENT
 
 No account registration and no account deletion flow, because we run no
 account system. The username and password are issued by the user's own
-server. There are no purchases, no subscriptions and no paid content. There
-is no user-generated content shared between users, so there is nothing to
-report or block. Chats are private to the user and their own server.
+server. There are no purchases, subscriptions or paid content. No
+user-generated content is shared between users, so there is nothing to report
+or block. Chats are private to the user and their own server.
 
 PERMISSIONS
 
-Camera and photo library are used only to attach an image to a chat message.
-Microphone and speech recognition are used only for voice dictation into the
-message box. Local network access is used to reach the user's own gateway.
-All are optional and requested only when the feature is used. The app
-requests no health or fitness data, no location, no contacts and no calendar
-access, and performs no tracking.
+Camera and photo library attach an image to a chat message. Microphone and
+speech recognition provide voice dictation. Local network access reaches the
+user's own gateway. Apple Health is covered above. All are optional and
+requested only when the feature is used. The app requests no location,
+contacts or calendar access, and performs no tracking.
 
 EXTERNAL SERVICES
 
 The app talks to one address: the gateway the user enters. We integrate no
 analytics, advertising, crash reporting or tracking SDKs, and no payment
 processor. It contacts no AI provider itself. Any AI service is configured by
-the user on their own server and is invisible to the app. Apple speech
-recognition is used for dictation, and Apple text to speech for reading
-replies aloud.
+the user on their own server. Apple speech recognition is used for dictation
+and Apple text to speech for reading replies aloud.
 
-REGIONS
+REGIONS AND REGULATED INDUSTRY
 
-The app functions identically in all regions. There are no regional feature
-or content differences. It is localized in English, Arabic, German, Spanish,
-French, Japanese, Korean, Portuguese and Chinese.
-
-REGULATED INDUSTRY
-
-Not applicable. The app is a network client for software the user runs. It
-provides no regulated service and includes no protected third-party material.
+The app functions identically in all regions, with no regional feature or
+content differences. It is localized in nine languages. It provides no
+regulated service and includes no protected third-party material.
 
 NO VPN FUNCTIONALITY
 
@@ -90,13 +93,12 @@ This app is not a VPN and provides no network tunneling of any kind. It does
 not link against NetworkExtension, does not use NEVPNManager or
 NETunnelProvider, requests no VPN entitlement, and bundles no tunneling
 library. It cannot route, proxy or observe any traffic other than its own
-requests to the one gateway address the user typed in. It collects no user
-information through any tunnel because it creates none, and shares no data
-with third parties.
+requests to the one gateway address the user typed in. It collects no
+information through any tunnel because it creates none.
 
-The app makes ordinary HTTPS and WebSocket requests to that address, plus
-standard local network access when the address is on the user's own LAN,
-which is what NSLocalNetworkUsageDescription covers.
+It makes ordinary HTTPS and WebSocket requests to that address, plus standard
+local network access when it is on the user's own LAN, which is what
+NSLocalNetworkUsageDescription covers.
 <!-- END NOTES BLOCK -->
 
 ---
