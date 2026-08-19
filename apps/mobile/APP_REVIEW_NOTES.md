@@ -29,15 +29,23 @@ A sample workspace is built into the app, so review needs no server.
 
 Then: open a seeded chat from the drawer (menu icon, top left); send a message
 and watch the reply stream with a live tool call; start a new chat; switch
-models from the composer; open Settings for the slash command reference; open
-the Jobs tab and pause or resume a scheduled job; open Settings, then About,
-for the line documenting this sample workspace.
+models from the composer; open the Bots screen to see the saved bots; open the
+Jobs tab and pause or resume a scheduled job; open Settings, then About, for
+the line documenting this sample workspace.
 
 The sample workspace runs entirely on device on 127.0.0.1. No network calls
 leave the device. It is available to every user, not only reviewers, is
 documented in Settings, then About, and the app does no reviewer detection.
 A "Sample" chip is shown while it is active so scripted replies cannot be
 mistaken for a real agent.
+
+BOTS
+
+A bot is a saved configuration on the user's own gateway: a name, a model and
+a set of instructions. Selecting one starts a chat that uses that
+configuration. Bots are created and stored by the user's own server. The app
+only lists them and opens a chat against one. Nothing about a bot leaves the
+user's device except to the gateway address the user entered.
 
 ACCOUNTS, PURCHASES, CONTENT
 
@@ -52,7 +60,9 @@ PERMISSIONS
 Camera and photo library are used only to attach an image to a chat message.
 Microphone and speech recognition are used only for voice dictation into the
 message box. Local network access is used to reach the user's own gateway.
-All are optional and requested only when the feature is used.
+All are optional and requested only when the feature is used. The app
+requests no health or fitness data, no location, no contacts and no calendar
+access, and performs no tracking.
 
 EXTERNAL SERVICES
 
@@ -76,14 +86,17 @@ provides no regulated service and includes no protected third-party material.
 
 NO VPN FUNCTIONALITY
 
-The app contains no VPN feature. It does not use NetworkExtension,
-NEVPNManager or NETunnelProvider, requests no VPN entitlement, and bundles no
-tunneling library. It collects no user information via VPN because there is
-no VPN, and shares no data with third parties. The word "VPN" appears only as
-guidance about the user's own network, in NSLocalNetworkUsageDescription and
-three connection status messages that suggest checking a VPN or Tailscale
-when the user's own gateway is unreachable. Tailscale is a third party
-product we do not bundle, link against or control.
+This app is not a VPN and provides no network tunneling of any kind. It does
+not link against NetworkExtension, does not use NEVPNManager or
+NETunnelProvider, requests no VPN entitlement, and bundles no tunneling
+library. It cannot route, proxy or observe any traffic other than its own
+requests to the one gateway address the user typed in. It collects no user
+information through any tunnel because it creates none, and shares no data
+with third parties.
+
+The app makes ordinary HTTPS and WebSocket requests to that address, plus
+standard local network access when the address is on the user's own LAN,
+which is what NSLocalNetworkUsageDescription covers.
 <!-- END NOTES BLOCK -->
 
 ---
