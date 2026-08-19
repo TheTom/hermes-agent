@@ -102,9 +102,9 @@ class GatewayAuthClient {
   /// Validate a gateway base URL before any request is attempted.
   ///
   /// HTTPS is always allowed. Plain HTTP is allowed for loopback and for
-  /// private/trusted network space (LAN, VPN mesh, mDNS) because that
-  /// traffic never leaves the user's own network — VPN mesh traffic (e.g.
-  /// Tailscale/WireGuard) is already encrypted at the tunnel layer. Plain
+  /// private/trusted network space (LAN, private overlay, mDNS) because that
+  /// traffic never leaves the user's own network. Private overlay traffic is
+  /// already encrypted outside this app. Plain
   /// HTTP to ordinary public hosts remains blocked to protect agent
   /// credentials.
   static String? validateBaseUrl(String raw) {
@@ -117,7 +117,7 @@ class GatewayAuthClient {
     }
     final scheme = uri.scheme.toLowerCase();
     if (scheme != 'http' && scheme != 'https') {
-      return 'Use https:// (or http:// for a private network / VPN).';
+      return 'Use https:// (or http:// on a trusted local network).';
     }
     if (uri.userInfo.isNotEmpty) {
       return 'Do not put credentials in the gateway URL.';
@@ -142,7 +142,7 @@ class GatewayAuthClient {
   }
 
   /// True when [raw] parses as a plain `http://` URL pointed at an allowed
-  /// non-loopback private/VPN host (LAN, Tailscale, mDNS, CGNAT). Used by
+  /// non-loopback private host (LAN, private overlay, mDNS, CGNAT). Used by
   /// the UI to decide whether to show a non-blocking "unencrypted" hint;
   /// loopback and https:// never need it.
   static bool isUnencryptedPrivateNetworkUrl(String raw) {
@@ -232,8 +232,8 @@ class GatewayAuthClient {
   /// host on every platform this app ships to, so it is loopback in practice.
   static bool _isLoopbackIPv4(List<int> v4) => v4[0] == 127 || v4[0] == 0;
 
-  /// RFC1918 private ranges, link-local, CGNAT (Tailscale tailnet IPs),
-  /// mDNS `.local` hostnames, and Tailscale MagicDNS `.ts.net` hostnames,
+  /// RFC1918 private ranges, link-local, CGNAT, mDNS `.local` hostnames, and
+  /// private-network `.ts.net` hostnames,
   /// plus the IPv6 equivalents (ULA `fc00::/7`, link-local `fe80::/10`) and
   /// the non-unicast IPv4/IPv6 space nothing should ever be fetched from.
   /// Does not include loopback — see [_isLoopbackHost].

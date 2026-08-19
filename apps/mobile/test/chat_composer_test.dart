@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:hermes_mobile/core/models/hermes_models.dart';
 import 'package:hermes_mobile/features/sessions/chat_composer.dart';
 import 'package:hermes_mobile/l10n/l10n.dart';
 
@@ -14,6 +15,7 @@ Future<void> _pump(
   required TextEditingController controller,
   required bool sending,
   VoidCallback? onStop,
+  List<HermesBotProfile> botMentions = const [],
 }) {
   return tester.pumpWidget(
     MaterialApp(
@@ -31,6 +33,7 @@ Future<void> _pump(
           onSend: () {},
           onStop: onStop,
           sending: sending,
+          botMentions: botMentions,
         ),
       ),
     ),
@@ -144,5 +147,67 @@ void main() {
       tester.widget<EditableText>(find.byType(EditableText)).focusNode.hasFocus,
       isFalse,
     );
+  });
+
+  testWidgets('typing @ shows bot handles and inserts the selected mention', (
+    tester,
+  ) async {
+    final controller = TextEditingController();
+    addTearDown(controller.dispose);
+    final techno = HermesBotProfile.fromJson({
+      'name': 'techno',
+      'ui_meta': {
+        'hermes-bots': {'title': 'Senior cat wrangler'},
+      },
+    });
+
+    await _pump(
+      tester,
+      controller: controller,
+      sending: false,
+      botMentions: [techno],
+    );
+    await tester.enterText(find.byType(TextField), 'Ask @te');
+    await tester.pump();
+
+    expect(find.text('Senior cat wrangler'), findsOneWidget);
+    expect(find.text('@techno'), findsOneWidget);
+    await tester.tap(find.text('@techno'));
+    await tester.pump();
+    expect(controller.text, 'Ask @techno ');
+  });
+
+  testWidgets('the composer can insert multiple bot mentions in one prompt', (
+    tester,
+  ) async {
+    final controller = TextEditingController();
+    addTearDown(controller.dispose);
+    HermesBotProfile bot(String name, String title) =>
+        HermesBotProfile.fromJson({
+          'name': name,
+          'ui_meta': {
+            'hermes-bots': {'title': title},
+          },
+        });
+
+    await _pump(
+      tester,
+      controller: controller,
+      sending: false,
+      botMentions: [
+        bot('techno', 'Senior cat wrangler'),
+        bot('coach', 'Fitness Coach'),
+      ],
+    );
+    await tester.enterText(find.byType(TextField), '@te');
+    await tester.pump();
+    await tester.tap(find.text('@techno'));
+    await tester.pump();
+    await tester.enterText(find.byType(TextField), '@techno ask @co');
+    await tester.pump();
+    await tester.tap(find.text('@coach'));
+    await tester.pump();
+
+    expect(controller.text, '@techno ask @coach ');
   });
 }

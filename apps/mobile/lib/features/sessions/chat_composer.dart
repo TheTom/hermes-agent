@@ -10,6 +10,8 @@ import 'package:speech_to_text/speech_to_text.dart' as stt;
 
 import 'package:hermes_mobile/core/services/feedback.dart';
 import 'package:hermes_mobile/core/services/slash_commands.dart';
+import 'package:hermes_mobile/core/models/hermes_models.dart';
+import 'package:hermes_mobile/features/bots/bot_mentions.dart';
 import 'package:hermes_mobile/l10n/l10n.dart';
 
 /// Local pending image chip before `image.attach_bytes` on send.
@@ -40,6 +42,8 @@ class ChatComposerBar extends StatefulWidget {
     this.onReadAloudChanged,
     this.slashCompleter,
     this.onPickSkill,
+    this.botMentions = const [],
+    this.activeProfile = 'default',
   });
 
   final TextEditingController controller;
@@ -59,6 +63,12 @@ class ChatComposerBar extends StatefulWidget {
   /// Opens the skills catalog (parent shows sheet + runs `/{skill}`).
   final VoidCallback? onPickSkill;
 
+  /// Live Bot Mode roster used for Desktop-parity @handle completion.
+  final List<HermesBotProfile> botMentions;
+
+  /// The profile receiving this prompt; it cannot mention itself.
+  final String activeProfile;
+
   @override
   State<ChatComposerBar> createState() => _ChatComposerBarState();
 }
@@ -66,6 +76,7 @@ class ChatComposerBar extends StatefulWidget {
 class _ChatComposerBarState extends State<ChatComposerBar> {
   final _picker = ImagePicker();
   final _speech = stt.SpeechToText();
+  final _focusNode = FocusNode();
   var _speechReady = false;
   var _listening = false;
   String _dictationBase = '';
@@ -104,7 +115,34 @@ class _ChatComposerBarState extends State<ChatComposerBar> {
     widget.controller.removeListener(_onComposerChanged);
     _slashDebounce?.cancel();
     unawaited(_speech.stop());
+    _focusNode.dispose();
     super.dispose();
+  }
+
+  List<HermesBotProfile> get _mentionItems {
+    if (_slashItems.isNotEmpty || _slashLoading) return const [];
+    return botMentionSuggestions(
+      widget.controller.value,
+      widget.botMentions,
+      activeProfile: widget.activeProfile,
+    ).take(8).toList();
+  }
+
+  void _applyMention(HermesBotProfile bot) {
+    final token = botMentionTokenAt(widget.controller.value);
+    if (token == null) return;
+    hermesHaptic(HapticIntent.selection);
+    final before = widget.controller.text.substring(0, token.start);
+    final after = widget.controller.text.substring(token.end);
+    final insertion = '@${bot.handle} ';
+    final next = '$before$insertion$after';
+    widget.controller.value = TextEditingValue(
+      text: next,
+      selection: TextSelection.collapsed(
+        offset: before.length + insertion.length,
+      ),
+    );
+    _focusNode.requestFocus();
   }
 
   void _rememberNames(Iterable<SlashCompletion> items) {
@@ -590,6 +628,81 @@ class _ChatComposerBarState extends State<ChatComposerBar> {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
+            if (_mentionItems.isNotEmpty)
+              Material(
+                elevation: 3,
+                borderRadius: BorderRadius.circular(14),
+                color: theme.colorScheme.surfaceContainerHigh,
+                clipBehavior: Clip.antiAlias,
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxHeight: 260),
+                  child: ListView.builder(
+                    shrinkWrap: true,
+                    padding: const EdgeInsets.symmetric(vertical: 4),
+                    itemCount: _mentionItems.length,
+                    itemBuilder: (context, index) {
+                      final bot = _mentionItems[index];
+                      final label = bot.displayName.trim();
+                      final initial = label.isEmpty
+                          ? '?'
+                          : label.characters.first.toUpperCase();
+                      return InkWell(
+                        onTap: () => _applyMention(bot),
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 14,
+                            vertical: 9,
+                          ),
+                          child: Row(
+                            children: [
+                              CircleAvatar(
+                                radius: 15,
+                                backgroundColor:
+                                    theme.colorScheme.primaryContainer,
+                                child: Text(
+                                  initial,
+                                  style: theme.textTheme.labelMedium?.copyWith(
+                                    color: theme.colorScheme.onPrimaryContainer,
+                                    fontWeight: FontWeight.w800,
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(width: 10),
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      label.isEmpty ? bot.handle : label,
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: theme.textTheme.bodyMedium
+                                          ?.copyWith(
+                                            fontWeight: FontWeight.w700,
+                                          ),
+                                    ),
+                                    Text(
+                                      '@${bot.handle}',
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: theme.textTheme.labelSmall
+                                          ?.copyWith(
+                                            color: theme.colorScheme.primary,
+                                            fontFamily: 'monospace',
+                                          ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+                ),
+              ),
+            if (_mentionItems.isNotEmpty) const SizedBox(height: 8),
             if (_slashItems.isNotEmpty || _slashLoading)
               Material(
                 elevation: 3,
@@ -848,6 +961,7 @@ class _ChatComposerBarState extends State<ChatComposerBar> {
                         Expanded(
                           child: TextField(
                             controller: widget.controller,
+                            focusNode: _focusNode,
                             // Stays editable through the whole agent turn —
                             // only the send *action* is gated on `sending`
                             // (see the trailing button below). Users can

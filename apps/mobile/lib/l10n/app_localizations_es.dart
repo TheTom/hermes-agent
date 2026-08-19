@@ -231,7 +231,7 @@ class AppLocalizationsEs extends AppLocalizations {
 
   @override
   String get autoReconnectGaveUp =>
-      'La reconexión automática se detuvo. Toca Reconectar (o revisa VPN / host).';
+      'La reconexión automática se detuvo. Toca Reconectar o comprueba que el host sea accesible.';
 
   @override
   String get signedInChatOfflineBody =>
@@ -252,7 +252,7 @@ class AppLocalizationsEs extends AppLocalizations {
 
   @override
   String get cannotReachGateway =>
-      'No se puede alcanzar el gateway. Revisa VPN/Tailscale y que el host esté encendido.';
+      'No se puede alcanzar el gateway. Revisa la dirección, la conexión de red y que el host esté encendido.';
 
   @override
   String get notConnected => 'Sin conexión';
@@ -371,7 +371,7 @@ class AppLocalizationsEs extends AppLocalizations {
 
   @override
   String get httpPrivateNetworkHint =>
-      'HTTP sin cifrar: bien en tu propia LAN o VPN; usa HTTPS para cualquier acceso público.';
+      'Usa HTTP sin cifrar solo en una red local de confianza. Usa HTTPS para el acceso remoto.';
 
   @override
   String get urlRequired => 'URL obligatoria';

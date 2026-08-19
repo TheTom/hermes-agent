@@ -517,7 +517,7 @@ abstract class AppLocalizations {
   /// No description provided for @autoReconnectGaveUp.
   ///
   /// In en, this message translates to:
-  /// **'Auto-reconnect gave up. Tap Reconnect (or check VPN / host).'**
+  /// **'Auto-reconnect gave up. Tap Reconnect or check that the host is reachable.'**
   String get autoReconnectGaveUp;
 
   /// No description provided for @signedInChatOfflineBody.
@@ -553,7 +553,7 @@ abstract class AppLocalizations {
   /// No description provided for @cannotReachGateway.
   ///
   /// In en, this message translates to:
-  /// **'Cannot reach the gateway. Check VPN/Tailscale and host power.'**
+  /// **'Cannot reach the gateway. Check the host address, network connection, and host power.'**
   String get cannotReachGateway;
 
   /// No description provided for @notConnected.
@@ -775,7 +775,7 @@ abstract class AppLocalizations {
   /// No description provided for @httpPrivateNetworkHint.
   ///
   /// In en, this message translates to:
-  /// **'Unencrypted HTTP: fine on your own LAN or VPN, use HTTPS for anything public.'**
+  /// **'Use unencrypted HTTP only on a trusted local network. Use HTTPS for remote access.'**
   String get httpPrivateNetworkHint;
 
   /// No description provided for @urlRequired.

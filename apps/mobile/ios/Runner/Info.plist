@@ -93,7 +93,7 @@
 		<string>hermes.mobile.oneOffSync</string>
 	</array>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>Hermes Go connects to your Hermes agent gateway on the local network or VPN.</string>
+	<string>Hermes Go connects to your Hermes agent gateway on a trusted local or private network.</string>
 	<key>NSCameraUsageDescription</key>
 	<string>Hermes uses the camera to attach photos to your agent chat.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
@@ -106,9 +106,9 @@
 	<string>Hermes Go reads health and activity data you choose so your Health Coach bot can summarize trends on your private Hermes gateway.</string>
 	<key>NSHealthUpdateUsageDescription</key>
 	<string>Hermes Go does not save or change any data in Apple Health. It only reads the health data you choose to share, so your Health Coach bot can summarize trends on your private Hermes gateway.</string>
-	<!-- Plain HTTP is allowed to private/VPN gateways (Dart validator in
+	<!-- Plain HTTP is allowed to trusted private gateways (Dart validator in
 	     GatewayAuthClient.validateBaseUrl is the actual policy gate: LAN,
-	     Tailscale/WireGuard, mDNS, CGNAT; public HTTP is still rejected
+	     private overlays, mDNS, and CGNAT; public HTTP is still rejected
 	     there). ATS itself can't distinguish those hosts, so arbitrary
 	     loads are allowed here and enforcement stays in the app layer. -->
 	<key>NSAppTransportSecurity</key>

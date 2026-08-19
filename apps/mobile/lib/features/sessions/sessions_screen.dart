@@ -202,6 +202,8 @@ class _SessionsScreenState extends ConsumerState<SessionsScreen> {
     ref.watch(sessionReadMapProvider); // rebuild drawer when reads change
     // Sticky pick, or gateway default from /api/model/options.
     final model = ref.watch(resolvedModelLabelProvider);
+    final botProfiles =
+        ref.watch(botsProvider).value?.profiles ?? const <HermesBotProfile>[];
     final active = _active;
     final isDemo = isDemoProfileId(
       ref.watch(connectionProfileProvider).value?.id ?? '',
@@ -355,6 +357,7 @@ class _SessionsScreenState extends ConsumerState<SessionsScreen> {
                   selection: TextSelection.collapsed(offset: withSpace.length),
                 );
               },
+              botMentions: botProfiles,
             )
           : SessionChatScreen(
               // Key ONLY on session id — never bake pending first-message into
@@ -470,6 +473,7 @@ class _NewChatHome extends StatelessWidget {
     this.onAttachmentsChanged,
     this.slashCompleter,
     this.onPickSkill,
+    this.botMentions = const [],
   });
 
   final String greeting;
@@ -482,6 +486,7 @@ class _NewChatHome extends StatelessWidget {
   final ValueChanged<List<PendingImage>>? onAttachmentsChanged;
   final Future<List<SlashCompletion>> Function(String text)? slashCompleter;
   final VoidCallback? onPickSkill;
+  final List<HermesBotProfile> botMentions;
 
   @override
   Widget build(BuildContext context) {
@@ -580,6 +585,8 @@ class _NewChatHome extends StatelessWidget {
           onAttachmentsChanged: onAttachmentsChanged,
           slashCompleter: slashCompleter,
           onPickSkill: onPickSkill,
+          botMentions: botMentions,
+          activeProfile: 'default',
         ),
       ],
     );

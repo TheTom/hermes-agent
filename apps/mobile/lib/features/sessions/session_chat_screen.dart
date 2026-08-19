@@ -23,6 +23,7 @@ import 'package:hermes_mobile/core/theme/hermes_skins.dart';
 import 'package:hermes_mobile/features/artifacts/artifact_detection.dart';
 import 'package:hermes_mobile/features/artifacts/artifact_viewer_flags.dart';
 import 'package:hermes_mobile/features/artifacts/artifact_viewer_screen.dart';
+import 'package:hermes_mobile/features/bots/bot_mentions.dart';
 import 'package:hermes_mobile/features/models/model_picker_sheet.dart';
 import 'package:hermes_mobile/features/skills/skills_picker_sheet.dart';
 import 'package:hermes_mobile/features/sessions/chat_composer.dart';
@@ -1072,7 +1073,7 @@ class SessionChatScreenState extends ConsumerState<SessionChatScreen> {
   Future<void> _retryFrom(HermesMessage message) async {
     final user = _precedingUser(message);
     if (user == null) return;
-    var text = user.content?.trim() ?? '';
+    var text = stripBotMentionHandoff(user.content ?? '').trim();
     // Strip image-chip suffix from optimistic labels if present.
     if (text.contains('\n📷')) {
       text = text.split('\n📷').first.trim();
@@ -1125,7 +1126,7 @@ class SessionChatScreenState extends ConsumerState<SessionChatScreen> {
 
   Future<void> _editUserMessage(HermesMessage message) async {
     if (!message.isVisibleUser) return;
-    final original = message.content ?? '';
+    final original = stripBotMentionHandoff(message.content ?? '');
     final ctrl = TextEditingController(text: original);
     final next = await showDialog<String>(
       context: context,
@@ -1253,7 +1254,7 @@ class SessionChatScreenState extends ConsumerState<SessionChatScreen> {
       case 'delete':
         await _deleteMessage(message);
       case 'copy':
-        final text = message.content ?? '';
+        final text = stripBotMentionHandoff(message.content ?? '');
         if (text.isNotEmpty) {
           hermesHaptic(HapticIntent.selection);
           await Clipboard.setData(ClipboardData(text: text));
@@ -1264,7 +1265,7 @@ class SessionChatScreenState extends ConsumerState<SessionChatScreen> {
           }
         }
       case 'speak':
-        final text = message.content ?? '';
+        final text = stripBotMentionHandoff(message.content ?? '');
         if (text.isNotEmpty) {
           hermesHaptic(HapticIntent.open);
           unawaited(_speaker.speakOnce(text));
@@ -1684,9 +1685,27 @@ class SessionChatScreenState extends ConsumerState<SessionChatScreen> {
       return;
     }
 
+    final bots =
+        ref.read(botsProvider).value?.profiles ?? const <HermesBotProfile>[];
+    final activeProfile = widget.profileName?.trim().isNotEmpty == true
+        ? widget.profileName!.trim()
+        : 'default';
+    final activeBot = bots
+        .where(
+          (bot) => bot.name.trim().toLowerCase() == activeProfile.toLowerCase(),
+        )
+        .firstOrNull;
+    final wirePrompt = appendBotMentionHandoff(
+      text: prompt,
+      roster: bots,
+      activeProfile: activeProfile,
+      senderName: activeBot?.displayName ?? 'Hermes',
+      senderHandle: activeBot?.handle ?? 'hermes',
+    );
+
     final result = await sync.sendMessage(
       sessionId: _session.id,
-      input: prompt,
+      input: wirePrompt,
       model: model,
       provider: provider,
       reasoningEffort: reasoningEffort,
@@ -2023,6 +2042,11 @@ class SessionChatScreenState extends ConsumerState<SessionChatScreen> {
     // holding back what gets rendered.
     final renderMessages = _messages;
     final artifactPaths = _knownArtifactPaths(renderMessages);
+    final botProfiles =
+        ref.watch(botsProvider).value?.profiles ?? const <HermesBotProfile>[];
+    final activeProfile = widget.profileName?.trim().isNotEmpty == true
+        ? widget.profileName!.trim()
+        : 'default';
     final showThinking = _showThinkingBubble;
     final renderSending = _sending;
     final statusText = _showStatusStrip ? _toolStatus : null;
@@ -2267,6 +2291,8 @@ class SessionChatScreenState extends ConsumerState<SessionChatScreen> {
             return sync.completeSlashWithSkills(text);
           },
           onPickSkill: () => unawaited(_pickAndRunSkill()),
+          botMentions: botProfiles,
+          activeProfile: activeProfile,
         ),
       ],
     );
@@ -2309,11 +2335,12 @@ class SessionChatScreenState extends ConsumerState<SessionChatScreen> {
               icon: const Icon(Icons.forum_outlined, size: 18),
               label: const Text('Sessions'),
             ),
-          IconButton(
-            tooltip: context.l10n.sync,
-            onPressed: _loading ? null : _load,
-            icon: const Icon(Icons.sync),
-          ),
+          if (widget.onOpenBotSessions == null)
+            IconButton(
+              tooltip: context.l10n.sync,
+              onPressed: _loading ? null : _load,
+              icon: const Icon(Icons.sync),
+            ),
         ],
       ),
       body: body,
@@ -2617,7 +2644,7 @@ class _MessageBubble extends StatelessWidget {
         ? detectArtifactsInMessage(message, known: knownArtifactPaths)
         : const <DetectedArtifact>[];
     // Slash/system status — strip `slash:/cmd` prefix for a cleaner label.
-    var body = message.content?.trim() ?? '';
+    var body = stripBotMentionHandoff(message.content ?? '').trim();
     String? slashLabel;
     if (isSystem && body.startsWith('slash:')) {
       final nl = body.indexOf('\n');

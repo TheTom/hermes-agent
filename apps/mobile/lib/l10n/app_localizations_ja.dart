@@ -224,7 +224,7 @@ class AppLocalizationsJa extends AppLocalizations {
 
   @override
   String get autoReconnectGaveUp =>
-      'Auto-reconnect gave up. Tap Reconnect (or check VPN / host).';
+      'Auto-reconnect gave up. Tap Reconnect or check that the host is reachable.';
 
   @override
   String get signedInChatOfflineBody =>
@@ -245,7 +245,7 @@ class AppLocalizationsJa extends AppLocalizations {
 
   @override
   String get cannotReachGateway =>
-      'Cannot reach the gateway. Check VPN/Tailscale and host power.';
+      'Cannot reach the gateway. Check the host address, network connection, and host power.';
 
   @override
   String get notConnected => '未接続';
@@ -364,7 +364,7 @@ class AppLocalizationsJa extends AppLocalizations {
 
   @override
   String get httpPrivateNetworkHint =>
-      'Unencrypted HTTP: fine on your own LAN or VPN, use HTTPS for anything public.';
+      'Use unencrypted HTTP only on a trusted local network. Use HTTPS for remote access.';
 
   @override
   String get urlRequired => 'URL required';
