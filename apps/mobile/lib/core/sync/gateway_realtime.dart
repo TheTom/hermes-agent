@@ -965,7 +965,7 @@ class GatewayRealtime {
     try {
       final result = await _client.request('session.list', {'limit': 100});
       final raw = result['sessions'];
-      if (raw is! List) return _sessionSync.loadSessionsLocal();
+      if (raw is! List) return await _sessionSync.loadSessionsLocal();
       return [
         for (final item in raw)
           if (item is Map)

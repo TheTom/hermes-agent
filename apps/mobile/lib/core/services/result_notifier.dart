@@ -150,7 +150,7 @@ class ResultNotifier {
         await ios.requestPermissions(alert: true, badge: true, sound: true);
         // Critical: requestPermissions can return null/false even when already
         // authorized in some iOS versions — always re-check.
-        return refreshPermissionStatus();
+        return await refreshPermissionStatus();
       }
 
       _permissionGranted = true;

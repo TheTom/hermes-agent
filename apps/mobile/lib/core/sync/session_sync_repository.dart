@@ -336,7 +336,7 @@ class SessionSyncRepository {
             syncStatus: s.id.startsWith('local_') ? 'pending' : 'synced',
           ),
       ]);
-      return loadSessionsLocal();
+      return await loadSessionsLocal();
     } catch (e, st) {
       debugPrint('SessionSync: pull sessions failed: $e\n$st');
       // Prefer showing a non-empty local cache; rethrow if cache empty so UI
