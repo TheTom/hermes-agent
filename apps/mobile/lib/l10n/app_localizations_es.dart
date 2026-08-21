@@ -371,7 +371,7 @@ class AppLocalizationsEs extends AppLocalizations {
 
   @override
   String get httpPrivateNetworkHint =>
-      'Usa HTTP sin cifrar solo en una red local de confianza. Usa HTTPS para el acceso remoto.';
+      'HTTP sin cifrar solo se permite en una LAN de confianza o VPN privada. El acceso remoto público requiere HTTPS.';
 
   @override
   String get urlRequired => 'URL obligatoria';

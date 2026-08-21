@@ -775,7 +775,7 @@ abstract class AppLocalizations {
   /// No description provided for @httpPrivateNetworkHint.
   ///
   /// In en, this message translates to:
-  /// **'Use unencrypted HTTP only on a trusted local network. Use HTTPS for remote access.'**
+  /// **'Plain HTTP is allowed only on a trusted LAN or private VPN. Public remote access requires HTTPS.'**
   String get httpPrivateNetworkHint;
 
   /// No description provided for @urlRequired.

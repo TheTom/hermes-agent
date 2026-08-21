@@ -141,7 +141,7 @@
   "sessionExpiredBanner": "Tu sesión del gateway caducó (o se cerró).\nVuelve a introducir la contraseña — no reconectamos automáticamente tras caducidad.",
   "connectIntro": "Conéctate a tu gateway Hermes — igual que Desktop: URL base, luego usuario y contraseña. Sin API key.",
   "gatewayBaseUrl": "URL base del gateway",
-  "httpPrivateNetworkHint": "Usa HTTP sin cifrar solo en una red local de confianza. Usa HTTPS para el acceso remoto.",
+  "httpPrivateNetworkHint": "HTTP sin cifrar solo se permite en una LAN de confianza o VPN privada. El acceso remoto público requiere HTTPS.",
   "urlRequired": "URL obligatoria",
   "provider": "Proveedor",
   "username": "Usuario",

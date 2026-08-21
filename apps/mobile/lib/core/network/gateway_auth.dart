@@ -394,7 +394,7 @@ class GatewayAuthClient {
         baseUrl: base,
         reachable: false,
         authMode: GatewayAuthMode.unknown,
-        error: e.toString(),
+        error: _probeErrorMessage(e),
       );
     }
 
@@ -435,6 +435,25 @@ class GatewayAuthClient {
       providers: providers,
       version: status?['version']?.toString(),
     );
+  }
+
+  static String _probeErrorMessage(Object error) {
+    if (error is DioException) {
+      final response = error.response;
+      final status = response?.statusCode;
+      final data = response?.data;
+      final detail = data is Map ? '${data['detail'] ?? ''}'.trim() : '';
+      if (status == 400 && detail.toLowerCase().contains('invalid host')) {
+        return 'Gateway rejected this proxy hostname (HTTP 400 Invalid Host). '
+            'Bind Hermes to the Tailscale/LAN interface instead of loopback, '
+            'or configure the proxy Host header to match the dashboard bind.';
+      }
+      if (status != null && detail.isNotEmpty) {
+        return 'Gateway probe failed (HTTP $status): $detail';
+      }
+      if (status != null) return 'Gateway probe failed (HTTP $status).';
+    }
+    return error.toString();
   }
 
   /// POST /auth/password-login — Desktop login page body shape.

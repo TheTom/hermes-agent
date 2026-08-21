@@ -370,7 +370,7 @@ class AppLocalizationsFr extends AppLocalizations {
 
   @override
   String get httpPrivateNetworkHint =>
-      'Use unencrypted HTTP only on a trusted local network. Use HTTPS for remote access.';
+      'Plain HTTP is allowed only on a trusted LAN or private VPN. Public remote access requires HTTPS.';
 
   @override
   String get urlRequired => 'URL required';

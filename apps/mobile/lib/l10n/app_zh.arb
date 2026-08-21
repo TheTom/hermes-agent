@@ -141,7 +141,7 @@
   "sessionExpiredBanner": "你的网关会话已过期或已退出登录。\n请重新输入密码以继续。会话过期后不会自动重新连接。",
   "connectIntro": "连接到你的 Hermes 网关 — 与 Desktop 相同：基础 URL，然后用户名和密码。无需 API 密钥。",
   "gatewayBaseUrl": "网关基础 URL",
-  "httpPrivateNetworkHint": "Use unencrypted HTTP only on a trusted local network. Use HTTPS for remote access.",
+  "httpPrivateNetworkHint": "Plain HTTP is allowed only on a trusted LAN or private VPN. Public remote access requires HTTPS.",
   "urlRequired": "URL required",
   "provider": "Provider",
   "username": "用户名",

@@ -69,14 +69,23 @@ The simplest safe setup is putting your phone and your Hermes host on the same
 private network with a mesh VPN, instead of port-forwarding the gateway:
 
 - **[Tailscale](https://tailscale.com)** (recommended) — install on the host
-  and phone, sign into the same tailnet, done. `tailscale serve` can front the
-  dashboard with automatic HTTPS certificates, which satisfies the app's
-  HTTPS requirement out of the box:
+  and phone, sign into the same tailnet, and bind the dashboard to its
+  Tailscale address. The tunnel already encrypts this traffic, and Hermes Go
+  accepts plain HTTP to Tailscale addresses:
 
   ```bash
-  tailscale serve --bg https / http://localhost:9119
-  # then connect the app to https://<host>.<tailnet>.ts.net
+  hermes dashboard --host "$(tailscale ip -4)" --no-open
+  # then connect the app to http://<tailscale-ip>:9119
   ```
+
+  Binding to `0.0.0.0` also works, but exposes the authenticated dashboard to
+  the host's other network interfaces. Do not bind to `127.0.0.1` and point a
+  reverse proxy at it without accounting for Hermes' Host/Origin protection:
+  the proxy's public hostname will not match the loopback bind, so Hermes
+  rejects `/api/status` with `400 Invalid Host header`. If you want HTTPS via
+  `tailscale serve`, Caddy, or nginx, run the authenticated dashboard on a
+  proxy-reachable non-loopback bind and ensure the forwarded Host/Origin are
+  accepted by that bind.
 
 - **[WireGuard](https://www.wireguard.com)** — fully self-hosted alternative
   if you already run your own VPN server; pair it with a TLS reverse proxy
@@ -115,6 +124,11 @@ The connection screen first probes `/api/status`. If authentication is
 required, it discovers the configured provider, submits the username/password
 login, persists only the resulting session cookies in platform secure storage,
 and mints a single-use WebSocket ticket. The password is not retained.
+
+If the Host check reports `400 Invalid Host header`, the dashboard is reachable
+but its bind host does not match the hostname forwarded by a reverse proxy. Bind
+the dashboard directly to the LAN/VPN interface and use that private address,
+or correct the proxy/bind pairing; changing credentials will not fix this error.
 
 ## Deploy to an iPhone without losing connections
 

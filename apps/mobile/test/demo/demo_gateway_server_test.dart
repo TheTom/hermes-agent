@@ -6,6 +6,7 @@
 // real client code never has to know it's talking to a fake gateway, so the
 // strongest test is exercising it with that exact code.
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/services.dart';
@@ -123,6 +124,34 @@ void main() {
       expect(probe.authMode, GatewayAuthMode.session);
       expect(probe.passwordProviders, isNotEmpty);
       expect(probe.isPasswordGateway, isTrue);
+    }),
+  );
+
+  test(
+    'probe(): explains reverse-proxy Host rejection',
+    () => _withRealHttp(() async {
+      final rejecting = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      rejecting.listen((request) async {
+        request.response
+          ..statusCode = HttpStatus.badRequest
+          ..headers.contentType = ContentType.json
+          ..write(
+            jsonEncode({
+              'detail':
+                  'Invalid Host header. Dashboard requests must use the hostname the server was bound to.',
+            }),
+          );
+        await request.response.close();
+      });
+      addTearDown(() => rejecting.close(force: true));
+
+      final probe = await GatewayAuthClient.probe(
+        'http://${rejecting.address.address}:${rejecting.port}',
+      );
+
+      expect(probe.reachable, isFalse);
+      expect(probe.error, contains('HTTP 400 Invalid Host'));
+      expect(probe.error, contains('Tailscale/LAN interface'));
     }),
   );
 
