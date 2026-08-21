@@ -243,6 +243,90 @@ void main() {
     expect(rooms['Research']?.messages.last.source, 'Mac mini');
   });
 
+  test('v3 group rooms use their projected name and preserve identity', () {
+    final rooms = parseHermesBotGroupRooms({
+      'profiles': [
+        {
+          'name': 'default',
+          'is_default': true,
+          'ui_meta': {
+            'hermes-bots-groups': {
+              'version': 3,
+              'rooms': {
+                'id:room-123': {
+                  'name': 'Research team',
+                  'roomId': 'room-123',
+                  'revision': 42,
+                  'members': [
+                    {'name': 'reader'},
+                  ],
+                  'log': [
+                    {
+                      'id': 'writer:7',
+                      'thread': 'thread-9',
+                      'from': {'kind': 'member', 'name': 'reader'},
+                      'text': 'Found it.',
+                      'at': 1787072401000,
+                    },
+                  ],
+                },
+              },
+            },
+          },
+        },
+      ],
+    });
+
+    expect(rooms.keys, ['Research team']);
+    expect(rooms.containsKey('id:room-123'), isFalse);
+    expect(rooms['Research team']?.roomId, 'room-123');
+    expect(rooms['Research team']?.revision, 42);
+    expect(rooms['Research team']?.messages.single.id, 'writer:7');
+    expect(rooms['Research team']?.messages.single.thread, 'thread-9');
+  });
+
+  test('v3 group room tombstones prevent stale rooms from reappearing', () {
+    final rooms = parseHermesBotGroupRooms({
+      'profiles': [
+        {
+          'name': 'default',
+          'is_default': true,
+          'ui_meta': {
+            'hermes-bots-groups': {
+              'version': 3,
+              'rooms': {
+                'id:deleted-room': {
+                  'name': 'Deleted room',
+                  'roomId': 'deleted-room',
+                  'revision': 99,
+                  'log': [
+                    {
+                      'from': {'kind': 'user', 'name': 'You'},
+                      'text': 'Stale message',
+                    },
+                  ],
+                },
+                'name:legacy-room': {
+                  'name': 'Legacy room',
+                  'revision': 4,
+                  'log': [
+                    {
+                      'from': {'kind': 'user', 'name': 'You'},
+                      'text': 'Also stale',
+                    },
+                  ],
+                },
+              },
+              'deleted': {'id:deleted-room': 1, 'name:legacy-room': 4},
+            },
+          },
+        },
+      ],
+    });
+
+    expect(rooms, isEmpty);
+  });
+
   test(
     'bot roster stays hidden when neither capability nor plugin is exposed',
     () {

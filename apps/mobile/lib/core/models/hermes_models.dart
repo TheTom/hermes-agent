@@ -994,15 +994,19 @@ class HermesBotGroupMessage {
     required this.kind,
     required this.name,
     required this.text,
+    this.id,
     this.source,
     this.at,
+    this.thread,
   });
 
   final String kind;
   final String name;
   final String text;
+  final String? id;
   final String? source;
   final int? at;
+  final String? thread;
 
   bool get isUser => kind == 'user';
 
@@ -1017,9 +1021,11 @@ class HermesBotGroupMessage {
     return HermesBotGroupMessage(
       kind: kind == 'member' ? 'member' : 'user',
       name: '${from['name'] ?? (kind == 'member' ? 'Bot' : 'You')}'.trim(),
+      id: _asString(json['id'])?.trim(),
       source: _asString(from['source'])?.trim(),
       text: '${json['text'] ?? ''}'.trim(),
       at: at,
+      thread: _asString(json['thread'])?.trim(),
     );
   }
 }
@@ -1027,11 +1033,15 @@ class HermesBotGroupMessage {
 class HermesBotGroupRoom {
   const HermesBotGroupRoom({
     required this.name,
+    this.roomId,
+    this.revision = 0,
     this.messages = const [],
     this.members = const [],
   });
 
   final String name;
+  final String? roomId;
+  final int revision;
   final List<HermesBotGroupMessage> messages;
   final List<String> members;
 
@@ -1056,7 +1066,17 @@ class HermesBotGroupRoom {
               .where((member) => member.isNotEmpty)
               .toList(growable: false)
         : const <String>[];
-    return HermesBotGroupRoom(name: name, messages: messages, members: members);
+    final rawRevision = json['revision'];
+    final revision = rawRevision is num
+        ? rawRevision.toInt()
+        : int.tryParse('${rawRevision ?? ''}') ?? 0;
+    return HermesBotGroupRoom(
+      name: name,
+      roomId: _asString(json['roomId'])?.trim(),
+      revision: revision,
+      messages: messages,
+      members: members,
+    );
   }
 }
 
@@ -1074,14 +1094,37 @@ Map<String, HermesBotGroupRoom> parseHermesBotGroupRooms(
     if (rawEnvelope is! Map) continue;
     final rawRooms = rawEnvelope['rooms'];
     if (rawRooms is! Map) return const {};
+    final rawDeleted = rawEnvelope['deleted'];
+    final deleted = rawDeleted is Map ? rawDeleted : const {};
     final rooms = <String, HermesBotGroupRoom>{};
     for (final entry in rawRooms.entries) {
-      final roomName = '${entry.key}'.trim();
-      if (roomName.isEmpty || entry.value is! Map) continue;
-      rooms[roomName] = HermesBotGroupRoom.fromJson(
-        roomName,
-        (entry.value as Map).map((key, value) => MapEntry('$key', value)),
+      final roomKey = '${entry.key}'.trim();
+      if (roomKey.isEmpty || entry.value is! Map) continue;
+      final roomJson = (entry.value as Map).map(
+        (key, value) => MapEntry('$key', value),
       );
+      final rawDeletedRevision = deleted[entry.key] ?? deleted[roomKey];
+      final deletedRevision = rawDeletedRevision is num
+          ? rawDeletedRevision.toInt()
+          : int.tryParse('${rawDeletedRevision ?? ''}');
+      final rawRoomRevision = roomJson['revision'];
+      final roomRevision = rawRoomRevision is num
+          ? rawRoomRevision.toInt()
+          : int.tryParse('${rawRoomRevision ?? ''}') ?? 0;
+      if (deletedRevision != null &&
+          (roomKey.startsWith('id:') || deletedRevision >= roomRevision)) {
+        continue;
+      }
+      final projectedName = _asString(roomJson['name'])?.trim();
+      final legacyName = roomKey.startsWith('name:')
+          ? roomKey.substring('name:'.length).trim()
+          : roomKey;
+      final roomName = projectedName?.isNotEmpty == true
+          ? projectedName!
+          : legacyName;
+      if (roomName.isEmpty) continue;
+      final room = HermesBotGroupRoom.fromJson(roomName, roomJson);
+      rooms[roomName] = room;
     }
     return Map.unmodifiable(rooms);
   }
