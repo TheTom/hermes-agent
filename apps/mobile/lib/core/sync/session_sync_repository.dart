@@ -1634,7 +1634,8 @@ class SessionSyncRepository {
   /// gateway_ws_client.dart) rather than message text: the code is the one
   /// stable signal shared by every 4018 message string, present and future.
   bool _isTerminalGatewayRejection(Object error) =>
-      error is GatewayRpcException && error.code == 4018;
+      error is GatewayRpcException &&
+      const {4004, 4018, 4029, 4030}.contains(error.code);
 
   /// True when the gateway or the upstream provider refused this request
   /// because a rate limit / usage quota is exhausted (HTTP 429).
@@ -3135,6 +3136,10 @@ class SessionSyncRepository {
             'session_id': liveId,
             'text': input,
             'truncate_before_user_ordinal': ?truncateBeforeUserOrdinal,
+            // Gateway protocol requires an explicit opt-in before a request
+            // may discard history. Desktop sends this alongside every rewind;
+            // omitting it is a live validation error (4029), not a disconnect.
+            if (truncateBeforeUserOrdinal != null) 'confirm_truncate': true,
           },
           // Desktop PROMPT_SUBMIT_REQUEST_TIMEOUT_MS — ack is usually instant.
           const Duration(minutes: 30),
@@ -3414,14 +3419,16 @@ class SessionSyncRepository {
         if (op.nextAttemptAt != null && op.nextAttemptAt!.isAfter(now)) {
           continue;
         }
+        final claimed = await _db.claimPendingOp(op.id);
+        if (claimed == null) continue;
         try {
-          await _runOp(api, op);
-          await _db.removeOp(op.id);
-          _notifyOutboxOpResolved(op);
+          await _runOp(api, claimed);
+          await _db.removeOp(claimed.id);
+          _notifyOutboxOpResolved(claimed);
         } catch (e) {
-          if (await _abandonHopelessOp(op, e)) continue;
-          await _db.bumpOpFailure(op.id, '$e');
-          debugPrint('SessionSync: op ${op.opType} failed: $e');
+          if (await _abandonHopelessOp(claimed, e)) continue;
+          await _db.bumpOpFailure(claimed.id, '$e');
+          debugPrint('SessionSync: op ${claimed.opType} failed: $e');
         }
       }
     } finally {
@@ -3511,30 +3518,32 @@ class SessionSyncRepository {
         if (op.nextAttemptAt != null && op.nextAttemptAt!.isAfter(now)) {
           continue;
         }
+        final claimed = await _db.claimPendingOp(op.id);
+        if (claimed == null) continue;
         try {
-          await _runOpOverWs(op);
-          await _db.removeOp(op.id);
-          _notifyOutboxOpResolved(op);
+          await _runOpOverWs(claimed);
+          await _db.removeOp(claimed.id);
+          _notifyOutboxOpResolved(claimed);
         } on TurnFailedAfterSubmit catch (e) {
           // Prompt reached the gateway — drop the op instead of retrying it
           // into a duplicate turn; the transcript pull reflects the failure.
-          await _db.removeOp(op.id);
-          _notifyOutboxOpResolved(op);
-          debugPrint('SessionSync: WS op ${op.opType} ran but failed: $e');
+          await _db.removeOp(claimed.id);
+          _notifyOutboxOpResolved(claimed);
+          debugPrint('SessionSync: WS op ${claimed.opType} ran but failed: $e');
         } on PromptSubmitUnconfirmed catch (e) {
           // The frame left the phone; the gateway may be running it. Replaying
           // this op on the next flush is exactly how a queued message becomes
           // two upstream provider calls. Drop it — a later transcript pull is
           // the authority on whether the turn landed.
-          await _db.removeOp(op.id);
-          _notifyOutboxOpResolved(op);
+          await _db.removeOp(claimed.id);
+          _notifyOutboxOpResolved(claimed);
           debugPrint(
-            'SessionSync: WS op ${op.opType} delivery unconfirmed: $e',
+            'SessionSync: WS op ${claimed.opType} delivery unconfirmed: $e',
           );
         } catch (e) {
-          if (await _abandonHopelessOp(op, e)) continue;
-          await _db.bumpOpFailure(op.id, '$e');
-          debugPrint('SessionSync: WS op ${op.opType} failed: $e');
+          if (await _abandonHopelessOp(claimed, e)) continue;
+          await _db.bumpOpFailure(claimed.id, '$e');
+          debugPrint('SessionSync: WS op ${claimed.opType} failed: $e');
         }
       }
     } finally {

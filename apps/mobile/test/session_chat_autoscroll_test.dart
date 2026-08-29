@@ -51,6 +51,43 @@ import 'package:hermes_mobile/features/sessions/session_chat_screen.dart';
 /// field in `session_chat_screen.dart` for the full audit of every
 /// `_messages` mutation site).
 void main() {
+  group('latestModelSwitchMarkerId', () {
+    test('returns the newest durable marker and ignores ordinary messages', () {
+      expect(
+        latestModelSwitchMarkerId([
+          const HermesMessage(id: 'ordinary', sessionId: 's', role: 'user'),
+          const HermesMessage(
+            id: 'old-switch',
+            sessionId: 's',
+            role: 'user',
+            displayKind: 'model_switch',
+          ),
+          const HermesMessage(
+            id: 'assistant',
+            sessionId: 's',
+            role: 'assistant',
+          ),
+          const HermesMessage(
+            id: 'new-switch',
+            sessionId: 's',
+            role: 'user',
+            displayKind: 'model_switch',
+          ),
+        ]),
+        'new-switch',
+      );
+    });
+
+    test('returns null when reconnect history has no model switch', () {
+      expect(
+        latestModelSwitchMarkerId([
+          const HermesMessage(id: 'ordinary', sessionId: 's', role: 'user'),
+        ]),
+        isNull,
+      );
+    });
+  });
+
   group('isPinnedToBottom', () {
     test('exactly at the newest-message anchor (offset 0) is pinned', () {
       expect(isPinnedToBottom(0), isTrue);

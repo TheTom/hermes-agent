@@ -433,6 +433,38 @@ void main() {
       expect(await sync.hasPendingOpsFor('sess-z'), isTrue);
       expect(await sync.hasPendingOpsFor('sess-other'), isFalse);
     });
+
+    test(
+      'concurrent reconnect workers can lease a queued message only once',
+      () async {
+        await db.enqueueOp(
+          PendingOpsCompanion.insert(
+            id: 'op-lease',
+            gatewayId: 'gw-lease',
+            opType: 'chat',
+            sessionId: const Value('sess-lease'),
+            payloadJson: jsonEncode({
+              'session_id': 'sess-lease',
+              'input': 'send exactly once',
+            }),
+            createdAt: DateTime.now().toUtc(),
+          ),
+        );
+
+        final claims = await Future.wait([
+          db.claimPendingOp('op-lease'),
+          db.claimPendingOp('op-lease'),
+          db.claimPendingOp('op-lease'),
+        ]);
+
+        expect(
+          claims.whereType<PendingOp>(),
+          hasLength(1),
+          reason:
+              'foreground, reconnect, and background flushes share one lease',
+        );
+      },
+    );
   });
 
   group('outbox ordering vs turns run elsewhere', () {

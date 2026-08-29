@@ -82,6 +82,11 @@ void main() {
       isTrue,
     );
     expect(
+      gw.promptSubmitParams[0]['confirm_truncate'],
+      isTrue,
+      reason: 'the gateway requires explicit confirmation for every rewind',
+    );
+    expect(
       gw.promptSubmitParams[1].containsKey('truncate_before_user_ordinal'),
       isFalse,
       reason: 'the retry must drop the ordinal entirely',
@@ -176,6 +181,38 @@ void main() {
     expect(result.queued, isFalse);
     expect(result.error, contains('image too large'));
     expect(await db.pendingOpsForGateway('gw3'), isEmpty);
+  });
+
+  test('a 4029 truncation validation failure is terminal and never queued as '
+      'a connectivity failure', () async {
+    final gw = await _FakeGateway.start(
+      promptSubmitBehavior: (params, callIndex) => _FakeResponse.error(
+        4029,
+        'truncation parameters require confirm_truncate=true',
+      ),
+    );
+    addTearDown(gw.close);
+
+    final sync = SessionSyncRepository(gatewayId: 'gw4029', db: db, api: null);
+    final realtime = GatewayRealtime(
+      profile: gw.openProfile(),
+      sessionSync: sync,
+    );
+    sync.bindRealtime(realtime);
+    addTearDown(realtime.dispose);
+    expect(await realtime.ensureLive(), isTrue);
+
+    final result = await sync.sendMessage(
+      sessionId: 'sess-4029',
+      input: 'edited message',
+      truncateBeforeUserOrdinal: 1,
+    );
+
+    expect(gw.promptSubmitCalls, 1);
+    expect(gw.promptSubmitParams.single['confirm_truncate'], isTrue);
+    expect(result.queued, isFalse);
+    expect(result.error, contains('confirm_truncate'));
+    expect(await db.pendingOpsForGateway('gw4029'), isEmpty);
   });
 
   test('a prompt.submit whose ack is lost to a dropped socket is NEVER '

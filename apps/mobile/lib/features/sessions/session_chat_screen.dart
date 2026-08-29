@@ -89,6 +89,17 @@ bool chatObserverHoldsPositionAt(
   return pixels > fixedPositionOffset;
 }
 
+/// Most recent durable model-switch marker in a chronological transcript.
+///
+/// A reconnect can miss the live `session.info` frame while still receiving
+/// this persisted marker during transcript reconciliation.
+String? latestModelSwitchMarkerId(List<HermesMessage> messages) {
+  for (final message in messages.reversed) {
+    if (message.displayKind == 'model_switch') return message.id;
+  }
+  return null;
+}
+
 /// Shared rename surface for embedded sessions and standalone bot chats.
 Future<String?> showRenameSessionDialog(
   BuildContext context, {
@@ -419,6 +430,7 @@ class SessionChatScreenState extends ConsumerState<SessionChatScreen> {
   String? _sessionReasoningEffort;
   bool? _sessionFastMode;
   Future<void>? _runtimeHydration;
+  String? _lastModelSwitchMarkerId;
 
   /// Memo for [_knownArtifactPaths] — the transcript the current index was
   /// built from, compared by identity.
@@ -752,7 +764,13 @@ class SessionChatScreenState extends ConsumerState<SessionChatScreen> {
     }
     final nested = event.payload['payload'];
     final body = nested is Map ? nested.cast<String, dynamic>() : event.payload;
-    _applySessionRuntime(SessionRuntimeState.fromJson(body));
+    final runtime = SessionRuntimeState.fromJson(body);
+    final modelChanged =
+        runtime.model != null && runtime.model != _sessionModel;
+    _applySessionRuntime(runtime);
+    if (modelChanged) {
+      unawaited(_refreshContextUsage(fullBreakdown: true));
+    }
   }
 
   Future<void> _softReloadMessages() async {
@@ -782,6 +800,13 @@ class SessionChatScreenState extends ConsumerState<SessionChatScreen> {
     SessionSyncRepository sync,
     List<HermesMessage> incoming,
   ) async {
+    final latestModelSwitchId = latestModelSwitchMarkerId(incoming);
+    final runtimeMarkerChanged =
+        latestModelSwitchId != null &&
+        latestModelSwitchId != _lastModelSwitchMarkerId;
+    if (latestModelSwitchId != null) {
+      _lastModelSwitchMarkerId = latestModelSwitchId;
+    }
     var stillQueued = _queuedHint;
     if (_queuedHint) {
       try {
@@ -801,6 +826,15 @@ class SessionChatScreenState extends ConsumerState<SessionChatScreen> {
             }
           : null,
     );
+    // A reconnect can miss the live session.info event while still pulling
+    // its durable model-switch marker. Rehydrate both runtime metadata and
+    // context capacity so the header cannot retain the previous model's
+    // 131k limit until another turn happens to correct it.
+    if (runtimeMarkerChanged) {
+      _runtimeHydration = _hydrateSessionRuntime();
+      unawaited(_runtimeHydration);
+      unawaited(_refreshContextUsage(fullBreakdown: true));
+    }
   }
 
   /// Tells [_chatObserver] a wholesale replacement of `_messages` is about

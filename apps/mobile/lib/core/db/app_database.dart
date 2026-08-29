@@ -618,6 +618,37 @@ class AppDatabase extends _$AppDatabase {
     return into(pendingOps).insertOnConflictUpdate(row);
   }
 
+  /// Atomically lease a due outbox operation to one flush worker.
+  ///
+  /// A chat operation remains pending for the entire agent turn, which may
+  /// take a minute while a wake-on-demand model loads.  Repository instances
+  /// have their own in-memory `_flushing` guard, so reconnect, foreground,
+  /// and background workers could previously read and submit the same row
+  /// concurrently. SQLite serializes this transaction; only the first worker
+  /// moves [nextAttemptAt] into the future and receives the row.
+  Future<PendingOp?> claimPendingOp(
+    String id, {
+    Duration lease = const Duration(minutes: 30),
+  }) {
+    return transaction(() async {
+      final row = await (select(
+        pendingOps,
+      )..where((r) => r.id.equals(id))).getSingleOrNull();
+      if (row == null) return null;
+
+      final now = DateTime.now().toUtc();
+      if (row.nextAttemptAt?.isAfter(now) == true) return null;
+
+      await (update(pendingOps)..where((r) => r.id.equals(id))).write(
+        PendingOpsCompanion(
+          nextAttemptAt: Value(now.add(lease)),
+          lastError: const Value('Sending to gateway…'),
+        ),
+      );
+      return row;
+    });
+  }
+
   Future<void> removeOp(String id) {
     return (delete(pendingOps)..where((r) => r.id.equals(id))).go();
   }
